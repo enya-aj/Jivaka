@@ -1,0 +1,75 @@
+{
+  "_comment": "Small curated offline dataset used by StubDictionarySource. NOT a real MeSH/UMLS extract — a placeholder until a licensed data source is wired up (see linking/umls_source.py).",
+  "terms": [
+    {
+      "term": "hypertension",
+      "definition_text": "Persistently elevated arterial blood pressure, conventionally defined as systolic >=130 mmHg or diastolic >=80 mmHg.",
+      "source": "stub",
+      "source_id": "STUB:0001",
+      "semantic_type": "diagnosis"
+    },
+    {
+      "term": "type 2 diabetes mellitus",
+      "definition_text": "A chronic metabolic disorder characterized by insulin resistance and relative insulin deficiency, resulting in hyperglycemia.",
+      "source": "stub",
+      "source_id": "STUB:0002",
+      "semantic_type": "diagnosis"
+    },
+    {
+      "term": "dyspnea",
+      "definition_text": "Subjective sensation of difficult or labored breathing.",
+      "source": "stub",
+      "source_id": "STUB:0003",
+      "semantic_type": "symptom"
+    },
+    {
+      "term": "fever",
+      "definition_text": "Elevation of body temperature above the normal circadian range, typically >=38.0C, usually due to an underlying pathologic process.",
+      "source": "stub",
+      "source_id": "STUB:0004",
+      "semantic_type": "symptom"
+    },
+    {
+      "term": "chest pain",
+      "definition_text": "Discomfort or pain in the chest that may originate from cardiac, pulmonary, musculoskeletal, or gastrointestinal structures.",
+      "source": "stub",
+      "source_id": "STUB:0005",
+      "semantic_type": "symptom"
+    },
+    {
+      "term": "metformin",
+      "definition_text": "A biguanide antihyperglycemic agent that decreases hepatic glucose production and improves insulin sensitivity, used first-line in type 2 diabetes.",
+      "source": "stub",
+      "source_id": "STUB:0006",
+      "semantic_type": "treatment"
+    },
+    {
+      "term": "lisinopril",
+      "definition_text": "An ACE inhibitor used to treat hypertension and heart failure by reducing angiotensin II production.",
+      "source": "stub",
+      "source_id": "STUB:0007",
+      "semantic_type": "treatment"
+    },
+    {
+      "term": "pneumonia",
+      "definition_text": "Infection of the lung parenchyma, causing inflammation of the alveoli, commonly presenting with fever, cough, and dyspnea.",
+      "source": "stub",
+      "source_id": "STUB:0008",
+      "semantic_type": "diagnosis"
+    },
+    {
+      "term": "amoxicillin",
+      "definition_text": "A beta-lactam antibiotic used to treat a range of bacterial infections, including community-acquired pneumonia.",
+      "source": "stub",
+      "source_id": "STUB:0009",
+      "semantic_type": "treatment"
+    },
+    {
+      "term": "myocardial infarction",
+      "definition_text": "Necrosis of cardiac muscle tissue resulting from prolonged ischemia, typically due to occlusion of a coronary artery.",
+      "source": "stub",
+      "source_id": "STUB:0010",
+      "semantic_type": "diagnosis"
+    }
+  ]
+}

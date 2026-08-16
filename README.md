@@ -1,0 +1,45 @@
+# Jivaka
+
+Jivaka is a medical knowledge tool built around a three-tier "trinity" knowledge graph — **Chunks** (patient records / textbook passages) → **Entities** (symptoms, diagnoses, treatments) → **Definitions** (verified MeSH/UMLS-style dictionary entries) — stored in [FalkorDB](https://www.falkordb.com/).
+
+This repository currently implements the **ingestion foundation**: turning one uploaded medical document into its portion of the trinity graph. Document intake, OCR fallback, chunking, entity extraction (via a local Ollama LLM), and definition linking are all implemented; question-answering retrieval and the web interface are planned separately and not yet built.
+
+See [docs/user-manual.md](docs/user-manual.md) for detailed setup and usage instructions.
+
+## Quick start
+
+1. Copy the environment template and set your Ollama model:
+   ```bash
+   cp .env.example .env
+   # edit .env and set OLLAMA_MODEL, e.g. OLLAMA_MODEL=llama3.1
+   ```
+2. Start the stack:
+   ```bash
+   docker compose up --build
+   ```
+   This starts FalkorDB (graph DB + browser UI on port 3000), Ollama (pulls `OLLAMA_MODEL` on first boot), and the Jivaka backend (API on port 8000).
+3. Ingest a document:
+   ```bash
+   docker compose exec backend jivaka ingest /app/data/uploads/your-file.pdf --doc-type textbook --print-graph
+   ```
+4. Inspect the resulting graph:
+   ```bash
+   docker compose exec backend jivaka graph show <doc_id>
+   ```
+   or open the FalkorDB browser UI at [http://localhost:3000](http://localhost:3000) and run Cypher directly.
+
+## Architecture
+
+- **backend/** — Python (FastAPI + Typer) ingestion service. See [backend/src/jivaka](backend/src/jivaka) for the pipeline: intake → OCR fallback → chunking → entity extraction → definition linking → graph write.
+- **FalkorDB** — single shared graph; every node/edge carries a `doc_id` property, and `Definition` nodes are deduplicated/reused across documents.
+- **Ollama** — serves the local LLM used for entity/relation extraction. No default model is baked in; set `OLLAMA_MODEL` in `.env`.
+
+## Project working rules
+
+- Any code change is documented in this README and [docs/user-manual.md](docs/user-manual.md) in the same change.
+- New dependencies are added to `backend/pyproject.toml` (and lockfile) in the same change that introduces them.
+- Changes to system-level dependencies (new services, env vars, volumes, ports) are reflected in `docker-compose.yml` and `backend/Dockerfile` in the same change.
+
+## Status
+
+Ingestion scaffold only. Retrieval (U-retrieval / Q&A with citations) and the web interface are future work — not part of this repository yet.

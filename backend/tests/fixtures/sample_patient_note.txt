@@ -1,0 +1,17 @@
+Chief Complaint:
+Patient presents with dyspnea and fever for 3 days.
+
+Subjective:
+55-year-old male reports progressive shortness of breath, productive cough, and
+subjective fevers starting three days ago. Denies chest pain. Reports mild fatigue.
+
+Objective:
+Temp 38.9C, HR 102, RR 22, SpO2 94% on room air. Crackles heard at right lung base
+on auscultation. Chest X-ray shows right lower lobe consolidation.
+
+Assessment:
+Findings consistent with community-acquired pneumonia.
+
+Plan:
+Start amoxicillin 500mg three times daily for 7 days. Recheck in 48 hours if
+symptoms do not improve. Advise rest and fluids.

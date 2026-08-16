@@ -1,0 +1,32 @@
+[tool.poetry]
+name = "jivaka"
+version = "0.1.0"
+description = "Jivaka medical knowledge graph ingestion service"
+authors = ["Jivaka contributors"]
+readme = "../README.md"
+packages = [{ include = "jivaka", from = "src" }]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+fastapi = "^0.115.0"
+uvicorn = { extras = ["standard"], version = "^0.32.0" }
+python-multipart = "^0.0.12"
+typer = "^0.13.0"
+rich = "^13.9.0"
+pydantic = "^2.9.0"
+pydantic-settings = "^2.6.0"
+falkordb = "^1.0.9"
+httpx = "^0.27.0"
+easyocr = "^1.7.2"
+pymupdf = "^1.24.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.0"
+pytest-asyncio = "^0.24.0"
+
+[tool.poetry.scripts]
+jivaka = "jivaka.cli:app"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# Poetry
+poetry.lock.bak
+
+# Env
+.env
+
+# Data (uploaded documents and model caches should not be committed)
+data/uploads/*
+!data/uploads/.gitkeep
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
