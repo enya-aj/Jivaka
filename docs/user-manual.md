@@ -17,7 +17,10 @@ Edit `.env`:
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `FALKOR_HOST` / `FALKOR_PORT` | FalkorDB connection, as seen by the backend container | `falkordb` / `6379` |
+| `COMPOSE_PROFILES` | `ollama-managed` starts the bundled `ollama`/`ollama-pull` services; clear it to reuse an Ollama already running on the host (see below) | `ollama-managed` |
+| `FALKOR_PORT` / `FALKOR_UI_PORT` | Host ports published for FalkorDB's protocol / browser UI | `6379` / `3000` |
+| `BACKEND_PORT` | Host port published for the Jivaka API | `8000` |
+| `FALKOR_HOST` | FalkorDB hostname, as seen by the backend container | `falkordb` |
 | `FALKOR_GRAPH_NAME` | Name of the single shared graph all documents write into | `jivaka` |
 | `OLLAMA_HOST` | Ollama base URL, as seen by the backend container | `http://ollama:11434` |
 | `OLLAMA_MODEL` | **Required.** Model used for entity/relation extraction | *(none — must be set)* |
@@ -25,17 +28,31 @@ Edit `.env`:
 | `UPLOAD_DIR` | Where uploaded files are written inside the backend container | `/app/data/uploads` |
 | `OCR_TEXT_DENSITY_THRESHOLD` | Chars-per-pixel² below which a page is treated as scanned and routed to OCR | `0.005` (placeholder, untuned) |
 
+### Reusing an existing Ollama instead of the bundled one
+
+If the host already runs Ollama (natively or in another stack) with your model already pulled, don't run a second one:
+```bash
+COMPOSE_PROFILES=
+OLLAMA_HOST=http://host.docker.internal:11434
+OLLAMA_MODEL=<a model already pulled there>
+```
+`host.docker.internal` resolves to the host from inside the backend container on both Docker Desktop and Linux (the compose file adds the needed `extra_hosts` entry for Linux).
+
+### Avoiding port collisions
+
+If `3000` or `8000` are already taken by something else on the host, set `FALKOR_UI_PORT` / `BACKEND_PORT` (and `FALKOR_PORT` if `6379` collides too) to free ports instead — everything else about the stack is unaffected.
+
 ## 3. Running the stack
 
 ```bash
 docker compose up --build
 ```
 
-This starts, in order:
-1. **falkordb** — the graph database. Browser UI at [http://localhost:3000](http://localhost:3000); protocol port `6379`.
-2. **ollama** — the local LLM server, port `11434`.
-3. **ollama-pull** — a one-shot job that pulls `OLLAMA_MODEL` into the `ollama` service, then exits. Ignore its "exited with code 0" status; that's success.
-4. **backend** — the Jivaka API, port `8000`.
+This starts (with default `.env`):
+1. **falkordb** — the graph database. Browser UI at `http://localhost:${FALKOR_UI_PORT}` (default [http://localhost:3000](http://localhost:3000)); protocol port `${FALKOR_PORT}` (default `6379`).
+2. **ollama** — the local LLM server, port `11434`. Skipped if `COMPOSE_PROFILES` is cleared (reusing an existing Ollama instead).
+3. **ollama-pull** — a one-shot job that pulls `OLLAMA_MODEL` into the `ollama` service, then exits. Ignore its "exited with code 0" status; that's success. Also skipped when `COMPOSE_PROFILES` is cleared.
+4. **backend** — the Jivaka API, port `${BACKEND_PORT}` (default `8000`).
 
 Check everything is healthy:
 

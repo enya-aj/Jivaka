@@ -3,7 +3,6 @@ name = "jivaka"
 version = "0.1.0"
 description = "Jivaka medical knowledge graph ingestion service"
 authors = ["Jivaka contributors"]
-readme = "../README.md"
 packages = [{ include = "jivaka", from = "src" }]
 
 [tool.poetry.dependencies]
@@ -17,6 +16,13 @@ pydantic = "^2.9.0"
 pydantic-settings = "^2.6.0"
 falkordb = "^1.0.9"
 httpx = "^0.27.0"
+# Pinned explicitly (and pulled from the CPU-only wheel index below): without
+# this, Poetry's resolver can satisfy easyocr's loose torch/torchvision
+# constraints with a badly mismatched, CUDA-bundled, ancient pairing that has
+# no installable wheel at all. This pipeline only ever runs OCR on CPU
+# (gpu=False in easyocr_backend.py), so CPU wheels are also far smaller.
+torch = { version = "^2.4.0", source = "pytorch-cpu" }
+torchvision = { version = "^0.19.0", source = "pytorch-cpu" }
 easyocr = "^1.7.2"
 pymupdf = "^1.24.0"
 
@@ -26,6 +32,11 @@ pytest-asyncio = "^0.24.0"
 
 [tool.poetry.scripts]
 jivaka = "jivaka.cli:app"
+
+[[tool.poetry.source]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+priority = "explicit"
 
 [build-system]
 requires = ["poetry-core"]

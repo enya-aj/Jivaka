@@ -2,8 +2,8 @@ services:
   falkordb:
     image: falkordb/falkordb:latest
     ports:
-      - "6379:6379"
-      - "3000:3000"
+      - "${FALKOR_PORT:-6379}:6379"
+      - "${FALKOR_UI_PORT:-3000}:3000"
     volumes:
       - falkordb_data:/data
     healthcheck:
@@ -12,8 +12,13 @@ services:
       timeout: 3s
       retries: 10
 
+  # Only started when the "ollama-managed" profile is active (the default -
+  # see COMPOSE_PROFILES in .env.example). Skip it on hosts that already run
+  # Ollama natively/elsewhere by clearing COMPOSE_PROFILES and pointing
+  # OLLAMA_HOST at that instance instead.
   ollama:
     image: ollama/ollama:latest
+    profiles: ["ollama-managed"]
     ports:
       - "11434:11434"
     volumes:
@@ -26,6 +31,7 @@ services:
 
   ollama-pull:
     image: ollama/ollama:latest
+    profiles: ["ollama-managed"]
     depends_on:
       ollama:
         condition: service_healthy
@@ -43,17 +49,23 @@ services:
         condition: service_healthy
       ollama:
         condition: service_healthy
+        required: false
+    extra_hosts:
+      # Lets OLLAMA_HOST=http://host.docker.internal:PORT reach a native/
+      # host-level Ollama on Linux too (works out of the box on Docker
+      # Desktop for Mac/Windows already).
+      - "host.docker.internal:host-gateway"
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT:-8000}:8000"
     environment:
       - FALKOR_HOST=falkordb
       - FALKOR_PORT=6379
       - FALKOR_GRAPH_NAME=${FALKOR_GRAPH_NAME:-jivaka}
-      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://ollama:11434}
       - OLLAMA_MODEL=${OLLAMA_MODEL:?set OLLAMA_MODEL in .env}
       - DEFINITION_SOURCE=${DEFINITION_SOURCE:-stub}
       - UPLOAD_DIR=/app/data/uploads
-      - OCR_TEXT_DENSITY_THRESHOLD=${OCR_TEXT_DENSITY_THRESHOLD:-0.02}
+      - OCR_TEXT_DENSITY_THRESHOLD=${OCR_TEXT_DENSITY_THRESHOLD:-0.005}
     volumes:
       - ./data/uploads:/app/data/uploads
       - ./data/reference:/app/data/reference

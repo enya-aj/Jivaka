@@ -16,6 +16,13 @@ poetry.lock.bak
 # Env
 .env
 
+# Secrets - never commit SSH keys or other credentials
+.keys/
+*.pem
+id_ed25519*
+id_rsa*
+!*.pub
+
 # Data (uploaded documents and model caches should not be committed)
 data/uploads/*
 !data/uploads/.gitkeep

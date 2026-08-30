@@ -1,3 +1,4 @@
+import enum
 from pathlib import Path
 from typing import Optional
 
@@ -8,22 +9,30 @@ from rich.tree import Tree
 
 from jivaka.db.falkor_client import get_graph
 from jivaka.db.graph_reader import get_document_graph
-from jivaka.ingestion.models import DocType
 from jivaka.ingestion.pipeline import ingest_document
 
 app = typer.Typer(help="Jivaka ingestion CLI")
 console = Console()
 
 
+class DocTypeArg(str, enum.Enum):
+    """Typer/Click can't build a choice option from `typing.Literal` (as used
+    by jivaka.ingestion.models.DocType) - a plain str Enum is its documented
+    way to get the same CLI validation."""
+
+    patient_record = "patient_record"
+    textbook = "textbook"
+
+
 @app.command()
 def ingest(
     path: Path = typer.Argument(..., exists=True, readable=True, help="Document to ingest"),
-    doc_type: DocType = typer.Option(..., "--doc-type", help="patient_record or textbook"),
+    doc_type: DocTypeArg = typer.Option(..., "--doc-type", help="patient_record or textbook"),
     print_graph: bool = typer.Option(False, "--print-graph", help="Print the resulting graph"),
 ) -> None:
     """Ingest one document into the trinity graph."""
     graph = get_graph()
-    result = ingest_document(path=path, doc_type=doc_type, graph=graph)
+    result = ingest_document(path=path, doc_type=doc_type.value, graph=graph)
 
     table = Table(title=f"Ingested {result.document.filename}")
     table.add_column("Field")
