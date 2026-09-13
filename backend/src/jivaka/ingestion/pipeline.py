@@ -1,6 +1,6 @@
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from falkordb import Graph
 
@@ -24,6 +24,7 @@ def ingest_document(
     graph: Graph,
     extractor: Optional[EntityExtractor] = None,
     definition_source: Optional[DefinitionSource] = None,
+    on_progress: Optional[Callable[[int, int], None]] = None,
 ) -> IngestionResult:
     """Orchestrates intake -> OCR fallback -> chunking -> entity extraction
     -> definition linking -> graph write for a single document."""
@@ -65,7 +66,7 @@ def ingest_document(
     definitions_matched = 0
     definitions_missing = 0
 
-    for chunk in chunks:
+    for i, chunk in enumerate(chunks, start=1):
         writer.write_chunk(chunk)
         extraction = extractor.extract(chunk)
         definitions_by_entity_id = {
@@ -79,6 +80,8 @@ def ingest_document(
         relation_count += r_count
         definitions_matched += d_matched
         definitions_missing += d_missing
+        if on_progress:
+            on_progress(i, len(chunks))
 
     elapsed = time.monotonic() - start
 

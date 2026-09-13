@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Jivaka — Ingestion</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --muted: #6b7280;
+    --border: #d8dde3;
+    --accent: #2563eb;
+    --danger: #dc2626;
+    --success: #16a34a;
+    --panel: #f7f8fa;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171c;
+      --fg: #e6e8eb;
+      --muted: #9aa3af;
+      --border: #2c3138;
+      --accent: #60a5fa;
+      --danger: #f87171;
+      --success: #4ade80;
+      --panel: #1b1f26;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 2rem 1.5rem 4rem;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    line-height: 1.5;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+  .subtitle { color: var(--muted); margin-top: 0; margin-bottom: 2rem; font-size: 0.9rem; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.25rem;
+    margin-bottom: 1.5rem;
+  }
+  .panel h2 { margin-top: 0; font-size: 1.05rem; }
+  label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 0.3rem; }
+  input[type="file"], select {
+    width: 100%;
+    padding: 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--fg);
+    margin-bottom: 1rem;
+  }
+  button {
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 0.55rem 1.1rem;
+    font-size: 0.95rem;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .status-line { display: flex; align-items: center; gap: 0.6rem; margin-top: 1rem; font-size: 0.9rem; }
+  .spinner {
+    width: 14px; height: 14px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .error { color: var(--danger); font-weight: 500; }
+  .success { color: var(--success); font-weight: 500; }
+  table { border-collapse: collapse; width: 100%; margin-top: 0.75rem; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 0.35rem 0.6rem; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 0.8rem; text-transform: uppercase; }
+  .tree { margin-top: 1rem; font-size: 0.9rem; }
+  .tree-doc { font-weight: 600; margin-bottom: 0.5rem; }
+  .tree-chunk { margin: 0.6rem 0 0.3rem; padding-left: 0.5rem; border-left: 2px solid var(--border); }
+  .tree-chunk-label { color: var(--muted); font-size: 0.85rem; }
+  .tree-entity { margin-left: 1.2rem; padding: 0.15rem 0; }
+  .tree-entity .type { color: var(--accent); font-size: 0.8rem; text-transform: uppercase; margin-right: 0.4rem; }
+  .tree-entity .def { color: var(--muted); }
+  .doc-list { list-style: none; padding: 0; margin: 0; }
+  .doc-list li {
+    padding: 0.5rem 0.6rem;
+    border-radius: 6px;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    font-size: 0.88rem;
+  }
+  .doc-list li:hover { background: var(--border); }
+  .doc-list .meta { color: var(--muted); white-space: nowrap; }
+  .empty { color: var(--muted); font-size: 0.88rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Jivaka</h1>
+  <p class="subtitle">Upload a document to build its portion of the trinity knowledge graph.</p>
+
+  <div class="panel">
+    <h2>Ingest a document</h2>
+    <form id="ingest-form">
+      <label for="file">Document</label>
+      <input type="file" id="file" name="file" accept=".pdf,.txt,.png,.jpg,.jpeg,.tiff,.epub,.mobi" required />
+
+      <label for="doc_type">Document type</label>
+      <select id="doc_type" name="doc_type">
+        <option value="patient_record">patient_record</option>
+        <option value="textbook">textbook</option>
+      </select>
+
+      <button type="submit" id="submit-btn">Ingest</button>
+    </form>
+    <div id="status-line"></div>
+  </div>
+
+  <div class="panel" id="result-panel" style="display:none;">
+    <h2>Result</h2>
+    <table id="summary-table"></table>
+    <div id="graph-tree" class="tree"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Recent documents</h2>
+    <ul class="doc-list" id="doc-list"><li class="empty">Loading…</li></ul>
+  </div>
+</div>
+
+<script>
+const API = "";
+
+function truncate(text, len = 60) {
+  text = (text || "").replace(/\s+/g, " ").trim();
+  return text.length <= len ? text : text.slice(0, len - 1) + "…";
+}
+
+function el(tag, attrs = {}, children = []) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") node.className = v;
+    else if (k === "text") node.textContent = v;
+    else node.setAttribute(k, v);
+  }
+  for (const child of children) node.appendChild(child);
+  return node;
+}
+
+async function loadRecentDocuments() {
+  const list = document.getElementById("doc-list");
+  try {
+    const res = await fetch(`${API}/documents`);
+    const docs = await res.json();
+    list.innerHTML = "";
+    if (docs.length === 0) {
+      list.appendChild(el("li", { class: "empty", text: "No documents ingested yet." }));
+      return;
+    }
+    for (const doc of docs) {
+      const item = el("li", {}, [
+        el("span", { text: doc.filename || doc.id }),
+        el("span", { class: "meta", text: `${doc.doc_type} · ${new Date(doc.ingested_at).toLocaleString()}` }),
+      ]);
+      item.addEventListener("click", () => showGraph(doc.id));
+      list.appendChild(item);
+    }
+  } catch (e) {
+    list.innerHTML = "";
+    list.appendChild(el("li", { class: "error", text: "Failed to load documents." }));
+  }
+}
+
+function renderSummary(result) {
+  const table = document.getElementById("summary-table");
+  table.innerHTML = "";
+  const rows = [
+    ["doc_id", result.document.id],
+    ["chunks", result.chunk_count],
+    ["entities", result.entity_count],
+    ["relations", result.relation_count],
+    ["definitions matched", result.definitions_matched],
+    ["definitions missing", result.definitions_missing],
+    ["OCR pages used", result.ocr_pages_used],
+    ["elapsed (s)", result.elapsed_seconds.toFixed(2)],
+  ];
+  for (const [label, value] of rows) {
+    table.appendChild(el("tr", {}, [el("td", { text: label }), el("td", { text: String(value) })]));
+  }
+}
+
+function renderTree(dump) {
+  const container = document.getElementById("graph-tree");
+  container.innerHTML = "";
+  container.appendChild(
+    el("div", { class: "tree-doc", text: `Document: ${dump.document.filename} (${dump.document.id})` })
+  );
+
+  for (const entry of dump.chunks) {
+    const chunk = entry.chunk;
+    container.appendChild(
+      el("div", { class: "tree-chunk-label", text: `Chunk #${chunk.order}: ${truncate(chunk.text)}` })
+    );
+    const chunkBox = el("div", { class: "tree-chunk" });
+    for (const e of entry.entities) {
+      const entity = e.entity;
+      const def = e.definition;
+      const line = el("div", { class: "tree-entity" }, [
+        el("span", { class: "type", text: entity.entity_type }),
+        el("span", { text: entity.name }),
+      ]);
+      line.appendChild(
+        el("span", {
+          class: "def",
+          text: def ? ` → ${truncate(def.definition_text, 80)}` : " → (no definition)",
+        })
+      );
+      chunkBox.appendChild(line);
+    }
+    container.appendChild(chunkBox);
+  }
+
+  if (dump.relations && dump.relations.length > 0) {
+    const table = el("table", {}, [
+      el("tr", {}, [el("th", { text: "source" }), el("th", { text: "relation" }), el("th", { text: "target" })]),
+    ]);
+    for (const rel of dump.relations) {
+      table.appendChild(
+        el("tr", {}, [
+          el("td", { text: rel.source_name }),
+          el("td", { text: rel.relation_type }),
+          el("td", { text: rel.target_name }),
+        ])
+      );
+    }
+    container.appendChild(el("h2", { text: "Entity relations" }));
+    container.appendChild(table);
+  }
+}
+
+async function showGraph(docId, resultForSummary) {
+  const res = await fetch(`${API}/documents/${docId}/graph`);
+  if (!res.ok) return;
+  const dump = await res.json();
+  document.getElementById("result-panel").style.display = "block";
+  if (resultForSummary) renderSummary(resultForSummary);
+  else document.getElementById("summary-table").innerHTML = "";
+  renderTree(dump);
+}
+
+function setStatus(html) {
+  document.getElementById("status-line").innerHTML = html;
+}
+
+async function pollJob(jobId) {
+  const poll = async () => {
+    const res = await fetch(`${API}/jobs/${jobId}`);
+    if (!res.ok) {
+      setStatus(`<span class="error">Lost track of job ${jobId}.</span>`);
+      return;
+    }
+    const job = await res.json();
+
+    if (job.status === "queued" || job.status === "running") {
+      const progress = job.progress ? ` (${job.progress})` : "";
+      setStatus(`<span class="spinner"></span> <span>${job.status}${progress} — this can take a few minutes.</span>`);
+      setTimeout(poll, 2000);
+      return;
+    }
+
+    document.getElementById("submit-btn").disabled = false;
+
+    if (job.status === "succeeded") {
+      setStatus(`<span class="success">Done.</span>`);
+      await showGraph(job.result.document.id, job.result);
+      loadRecentDocuments();
+    } else if (job.status === "failed") {
+      setStatus(`<span class="error">Failed: ${job.error || "unknown error"}</span>`);
+    }
+  };
+  poll();
+}
+
+document.getElementById("ingest-form").addEventListener("submit", async (evt) => {
+  evt.preventDefault();
+  const fileInput = document.getElementById("file");
+  const docType = document.getElementById("doc_type").value;
+  if (!fileInput.files.length) return;
+
+  const formData = new FormData();
+  formData.append("file", fileInput.files[0]);
+  formData.append("doc_type", docType);
+
+  document.getElementById("submit-btn").disabled = true;
+  setStatus(`<span class="spinner"></span> <span>Uploading…</span>`);
+
+  try {
+    const res = await fetch(`${API}/ingest`, { method: "POST", body: formData });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      setStatus(`<span class="error">${body.detail || "Upload failed."}</span>`);
+      document.getElementById("submit-btn").disabled = false;
+      return;
+    }
+    const { job_id } = await res.json();
+    pollJob(job_id);
+  } catch (e) {
+    setStatus(`<span class="error">Network error while uploading.</span>`);
+    document.getElementById("submit-btn").disabled = false;
+  }
+});
+
+loadRecentDocuments();
+</script>
+</body>
+</html>

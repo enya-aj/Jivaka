@@ -15,7 +15,7 @@ class OllamaClient:
         settings = get_settings()
         self.host = host or settings.ollama_host
         self.model = model or settings.ollama_model
-        self._client = httpx.Client(base_url=self.host, timeout=120.0)
+        self._client = httpx.Client(base_url=self.host, timeout=settings.ollama_request_timeout_seconds)
 
     def generate_json(self, prompt: str) -> dict:
         response = self._post_generate(prompt)

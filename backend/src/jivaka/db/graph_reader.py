@@ -3,6 +3,16 @@ from typing import Optional
 from falkordb import Graph
 
 
+def list_documents(graph: Graph, limit: int = 50) -> list[dict]:
+    """Most-recently-ingested documents first, for a simple browsing list -
+    not a substitute for the (future) retrieval layer."""
+    result = graph.query(
+        "MATCH (d:Document) RETURN d ORDER BY d.ingested_at DESC LIMIT $limit",
+        params={"limit": limit},
+    )
+    return [row[0].properties for row in result.result_set]
+
+
 def get_document_graph(graph: Graph, doc_id: str) -> Optional[dict]:
     """Read-only dump of a document's trinity subgraph, for CLI/API
     verification - not used by (future) retrieval, which will query FalkorDB

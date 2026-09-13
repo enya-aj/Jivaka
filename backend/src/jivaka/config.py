@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     definition_source: str = "stub"
     upload_dir: str = "./data/uploads"
     ocr_text_density_threshold: float = 0.005
+    # CPU-bound generation on a contended/shared Ollama instance can take
+    # several minutes per chunk; a too-short timeout here is swallowed by the
+    # per-chunk error handling in llm_extractor.py and silently yields 0
+    # entities for that chunk rather than a visible failure.
+    ollama_request_timeout_seconds: float = 300.0
 
 
 @lru_cache
