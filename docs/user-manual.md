@@ -49,6 +49,12 @@ If `3000` or `8000` are already taken by something else on the host, set `FALKOR
 docker compose up --build
 ```
 
+or the equivalent wrapper script:
+
+```bash
+scripts/deploy.sh
+```
+
 This starts (with default `.env`):
 1. **falkordb** — the graph database. Browser UI at `http://localhost:${FALKOR_UI_PORT}` (default [http://localhost:3000](http://localhost:3000)); protocol port `${FALKOR_PORT}` (default `6379`).
 2. **ollama** — the local LLM server, port `11434`. Skipped if `COMPOSE_PROFILES` is cleared (reusing an existing Ollama instead).
@@ -60,6 +66,19 @@ Check everything is healthy:
 ```bash
 docker compose ps
 ```
+
+### Managing an already-built stack
+
+Four scripts under `scripts/` wrap the equivalent `docker compose` commands (all resolve paths relative to the repo root, so they can be run from anywhere):
+
+| Script | Equivalent | When to use |
+|---|---|---|
+| `scripts/deploy.sh` | `docker compose build && docker compose up -d` | First run, or after source/dependency changes |
+| `scripts/start.sh` | `docker compose up -d` | Start using images already built - no rebuild |
+| `scripts/stop.sh` | `docker compose down` | Stop and remove containers - volumes/data untouched |
+| `scripts/restart.sh` | `docker compose restart` | Quick in-place restart, e.g. after an `.env` change |
+
+None of these touch volumes or bind-mounted data (FalkorDB's graph, `data/uploads/`) - only `docker ... -v`/`--volumes` flags would, and none of these scripts pass them.
 
 ## 4. Ingesting a document
 

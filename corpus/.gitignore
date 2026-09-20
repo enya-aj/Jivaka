@@ -1,0 +1,11 @@
+# The actual downloaded payloads - never committed. Only the registry
+# (what we intend to fetch) and code are versioned; what's actually on
+# disk is machine-local, regenerable state.
+/archive/
+/manifest.tsv
+/skip-report.md
+
+# Python
+.venv/
+__pycache__/
+*.pyc
