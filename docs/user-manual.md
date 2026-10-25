@@ -20,6 +20,7 @@ Edit `.env`:
 | `COMPOSE_PROFILES` | `ollama-managed` starts the bundled `ollama`/`ollama-pull` services; clear it to reuse an Ollama already running on the host (see below) | `ollama-managed` |
 | `FALKOR_PORT` / `FALKOR_UI_PORT` | Host ports published for FalkorDB's protocol / browser UI | `6379` / `3000` |
 | `BACKEND_PORT` | Host port published for the Jivaka API | `8000` |
+| `FALKOR_BIND_ADDRESS` | Host address FalkorDB's ports and the bundled Ollama listen on. Neither has a password, so keep it on localhost on any internet-facing host and use an SSH tunnel (`ssh -L 3000:localhost:3000 host`) for the browser UI | `127.0.0.1` |
 | `FALKOR_HOST` | FalkorDB hostname, as seen by the backend container | `falkordb` |
 | `FALKOR_GRAPH_NAME` | Name of the single shared graph all documents write into | `jivaka` |
 | `OLLAMA_HOST` | Ollama base URL, as seen by the backend container | `http://ollama:11434` |
