@@ -13,6 +13,19 @@ def list_documents(graph: Graph, limit: int = 50) -> list[dict]:
     return [row[0].properties for row in result.result_set]
 
 
+def find_documents_by_hash(graph: Graph, source_hash: str, doc_type: str) -> list[dict]:
+    """Documents already ingested from identical file content as the same
+    doc_type, used to skip re-ingesting a duplicate upload. Each dict
+    carries `ingestion_complete` (true, false while running/after a crash,
+    or missing on documents written before that flag existed)."""
+    result = graph.query(
+        "MATCH (d:Document {source_hash: $source_hash, doc_type: $doc_type}) "
+        "RETURN d ORDER BY d.ingested_at",
+        params={"source_hash": source_hash, "doc_type": doc_type},
+    )
+    return [row[0].properties for row in result.result_set]
+
+
 def get_document_graph(graph: Graph, doc_id: str) -> Optional[dict]:
     """Read-only dump of a document's trinity subgraph, for CLI/API
     verification - not used by (future) retrieval, which will query FalkorDB

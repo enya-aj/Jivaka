@@ -159,7 +159,7 @@ One shared FalkorDB graph (`FALKOR_GRAPH_NAME`). Every `Chunk` and `Entity` node
 - Entity extraction quality depends entirely on the Ollama model you choose and its prompt-following ability — there's no dedicated clinical NER model in this version.
 - One document ingests at a time per request, and each runs its own background job — there's no batch/queue-based ingestion of many documents at once, and job status is in-memory only (lost on a backend restart).
 - `.mobi` parsing quality varies by file — the unpacking library's output isn't perfectly uniform across older MOBI vs. newer hybrid (KF8/AZW3) files; treat it as best-effort until tested against real files.
-- Re-ingesting the same file (same content hash) is not deduplicated — it currently just creates another `Document` node.
+- Re-uploading the same file (same content hash and `doc_type`) doesn't create a second `Document`: the job succeeds with `"duplicate": true` and returns the existing document. A leftover from an earlier failed run of the same file is replaced. Duplicates already in the graph from before this check existed aren't cleaned up automatically.
 - No retrieval/Q&A layer or chat interface yet. The web page only covers ingestion + viewing one document's graph at a time (never a merged, cross-document view).
 
 ## 9. Troubleshooting

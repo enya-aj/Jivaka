@@ -80,3 +80,6 @@ class IngestionResult(BaseModel):
     definitions_missing: int
     ocr_pages_used: int
     elapsed_seconds: float
+    # True when this file (same content hash + doc_type) was already fully
+    # ingested: `document` is the existing one and nothing new was written.
+    duplicate: bool = False
