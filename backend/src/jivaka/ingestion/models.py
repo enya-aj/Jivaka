@@ -34,6 +34,9 @@ class Chunk(BaseModel):
     source_type: DocType
     page_number: Optional[int] = None
     char_span: Optional[tuple[int, int]] = None
+    # True when the text has been through jivaka.deid (patient records).
+    # Chat only reads patient chunks that carry this flag.
+    deidentified: bool = False
     created_at: datetime = Field(default_factory=utcnow)
 
 

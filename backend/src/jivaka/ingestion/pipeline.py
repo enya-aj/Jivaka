@@ -6,6 +6,7 @@ from falkordb import Graph
 
 from jivaka.config import get_settings
 from jivaka.db.schema import ensure_schema
+from jivaka.deid import Deidentifier, build_deidentifier
 from jivaka.ingestion.chunking.selector import get_chunker
 from jivaka.ingestion.extraction.base import EntityExtractor
 from jivaka.ingestion.extraction.llm_extractor import LLMEntityExtractor
@@ -25,6 +26,7 @@ def ingest_document(
     extractor: Optional[EntityExtractor] = None,
     definition_source: Optional[DefinitionSource] = None,
     on_progress: Optional[Callable[[int, int], None]] = None,
+    deidentifier: Optional[Deidentifier] = None,
 ) -> IngestionResult:
     """Orchestrates intake -> OCR fallback -> chunking -> entity extraction
     -> definition linking -> graph write for a single document."""
@@ -50,6 +52,15 @@ def ingest_document(
 
     full_text = "\n\n".join(page_texts)
 
+    # Patient records are de-identified before chunking, so the graph (chunk
+    # text, extracted entities) never holds names, IDs or other identifiers.
+    is_patient_record = doc_type == "patient_record"
+    if is_patient_record:
+        deidentifier = deidentifier or build_deidentifier(
+            settings.deid_use_ner, settings.deid_extra_id_patterns
+        )
+        full_text = deidentifier.deidentify(full_text)
+
     document = Document(
         filename=loaded.filename,
         doc_type=doc_type,
@@ -57,9 +68,13 @@ def ingest_document(
         ocr_used=ocr_pages_used > 0,
     )
     writer.write_document(document)
+    if is_patient_record:
+        writer.assign_pseudonym(document.id)
 
     chunker = get_chunker(doc_type)
     chunks = chunker.chunk(document.id, full_text)
+    for chunk in chunks:
+        chunk.deidentified = is_patient_record
 
     entity_count = 0
     relation_count = 0

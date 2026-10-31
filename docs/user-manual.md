@@ -1,6 +1,6 @@
-# Jivaka User Manual — Ingestion Scaffold
+# Jivaka User Manual
 
-This covers the current scope of the repository: turning one medical document into its portion of the trinity knowledge graph in FalkorDB, plus a small web page for doing that by hand. Retrieval (Q&A with citations) and a real chat interface are not part of this build yet.
+This covers the current scope of the repository: turning one medical document into its portion of the trinity knowledge graph in FalkorDB (de-identifying patient records first), a small web page for doing that by hand, and a chat page that answers questions from the graph with citations.
 
 ## 1. Prerequisites
 
@@ -144,7 +144,39 @@ curl http://localhost:8000/jobs/<job_id>
 
 There is no authentication on this API — it's for local verification only, not production/public exposure.
 
-## 7. Graph model, in brief
+## 7. Asking questions (chat)
+
+Open [http://localhost:8000/chat](http://localhost:8000/chat) (also linked from the ingestion page) and ask a question in Thai or English. Every question searches the whole graph - textbooks and de-identified patient records together - and the answer is written only from what that search finds:
+
+1. The question is split into candidate terms (1-4 word runs; Thai is word-segmented with PyThaiNLP) and matched against `Entity.normalized_name` and `Definition.normalized_term`. A Thai question also gets one short Ollama call that translates its medical terms to English, since most textbooks are English.
+2. Chunks are ranked by how many matched entities they mention, plus half weight for entities one `RELATED_TO` hop away. The top `RETRIEVAL_TOP_K` (default 6) become numbered sources.
+3. The same Ollama model as ingestion (`OLLAMA_MODEL`) writes the answer from those sources only, citing them as `[1]`, `[2]`, and streams it to the page. Click a citation or a source to see the passage, its entities and definitions.
+4. If nothing matches, the page says so instead of letting the model answer from memory.
+
+To ask about one patient, put their pseudonym in the question, e.g. "What was P-0001 given for pneumonia?". Follow-up questions in the same tab reuse the previous patient and terms. The conversation lives only in the browser tab; reloading or "New chat" clears it.
+
+Chat and ingestion share one Ollama model, so while a document is ingesting, an answer waits for the model ("Writing answer…" stays up longer).
+
+From the CLI, the same pipeline: `docker compose exec backend jivaka ask "How is pneumonia treated?"` prints the answer and its sources.
+
+The HTTP API behind the page:
+
+- `POST /chat` with `{"messages": [{"role": "user", "content": "..."}]}` (the whole conversation so far, ending with the new question) returns Server-Sent Events: `status` (`searching`, `writing`), `sources` (the numbered chunks), `token` (answer text, many), `done`, or `error`.
+- `GET /chunks/{chunk_id}` returns one source chunk with its document label, entities and definitions.
+
+## 8. Patient record de-identification
+
+Patient records (`doc_type=patient_record`) are de-identified **before chunking**, so the graph never stores names or identifiers for them: chunk text, extracted entities and the chat all see only the de-identified text. The original upload stays in `data/uploads`.
+
+- **Replaced:** names (after a title such as Mr./Dr./นาย/นางสาว/นพ., after a `Name:`/`ชื่อ:` label, or found by NER), hospital numbers after a label (`HN`, `AN`, `MRN`, `เลขประจำตัวผู้ป่วย`, ...), 13-digit Thai national IDs, phone numbers, emails, dates (numeric, English and Thai month names, Buddhist Era years) and addresses after an `Address:`/`ที่อยู่` label. NER (spaCy `en_core_web_sm` for English, PyThaiNLP ThaiNER for Thai) adds names and places that have no such cue.
+- **Placeholders:** `[PERSON-1]`, `[PERSON-2]`, ... (the same person keeps the same number throughout the document, and a name seen once is removed wherever it appears again), `[DATE]`, `[PHONE]`, `[EMAIL]`, `[ID]`, `[ADDRESS]`, `[PLACE]`. Durations ("3 days", "3 วัน"), doses and vital signs are kept.
+- **Pseudonyms:** each patient document gets `P-0001`, `P-0002`, ... (`Document.pseudonym`). Chat shows the pseudonym, never the filename.
+- **Hospital ID formats:** if your hospital numbers look different, add regexes as a JSON list in `DEID_EXTRA_ID_PATTERNS`; every match becomes `[ID]`.
+- **Documents ingested before this existed:** run `docker compose exec backend jivaka deid-backfill` once. It de-identifies their chunks in place, deletes entities whose names contained an identifier, and assigns pseudonyms. Until then, chat ignores those documents.
+
+Automatic de-identification misses some identifiers (unusual names in free text, identifiers in formats it doesn't know), so it lowers the risk but does not replace access control. The ingestion page and `GET /documents/{id}/graph` still show filenames, which often contain patient names.
+
+## 9. Graph model, in brief
 
 One shared FalkorDB graph (`FALKOR_GRAPH_NAME`). Every `Chunk` and `Entity` node carries a `doc_id` property scoping it to its source document. `Definition` nodes are deduplicated across documents (merged on normalized term + source) — if two documents both mention "hypertension," they share one `Definition` node.
 
@@ -153,17 +185,23 @@ One shared FalkorDB graph (`FALKOR_GRAPH_NAME`). Every `Chunk` and `Entity` node
                                                   (:Entity)-[:RELATED_TO {relation_type}]->(:Entity)
 ```
 
-## 8. Known limitations (current scaffold)
+Patient `Document` nodes also carry a `pseudonym`, and their `Chunk` nodes `deidentified = true`. A single `(:Counter {name: 'patient_pseudonym'})` node holds the last pseudonym number handed out.
+
+## 10. Known limitations (current scaffold)
 
 - `DEFINITION_SOURCE=stub` only ships ~10 curated terms (`data/reference/definitions_stub.json`). Real MeSH/UMLS integration requires a UTS license and is not implemented (`DEFINITION_SOURCE=umls` raises `NotImplementedError`).
 - Entity extraction quality depends entirely on the Ollama model you choose and its prompt-following ability — there's no dedicated clinical NER model in this version.
 - One document ingests at a time per request, and each runs its own background job — there's no batch/queue-based ingestion of many documents at once, and job status is in-memory only (lost on a backend restart).
 - `.mobi` parsing quality varies by file — the unpacking library's output isn't perfectly uniform across older MOBI vs. newer hybrid (KF8/AZW3) files; treat it as best-effort until tested against real files.
 - Re-ingesting the same file (same content hash) is not deduplicated — it currently just creates another `Document` node.
-- No retrieval/Q&A layer or chat interface yet. The web page only covers ingestion + viewing one document's graph at a time (never a merged, cross-document view).
+- Chat retrieval only matches entity names the extractor produced (plus their definitions and one relation hop); questions phrased with words that never became entities find nothing. Full-text and embedding search are planned next.
+- Each patient document gets its own pseudonym: two documents about the same person are two pseudonyms.
+- There is no login. Chat makes de-identified patient records readable to anyone who can reach the backend - see the security note in the README before exposing it.
 
-## 9. Troubleshooting
+## 11. Troubleshooting
 
 - **`backend` container fails immediately on startup:** almost always a missing `OLLAMA_MODEL` in `.env` — the app fails fast rather than silently using an undefined model.
 - **`jivaka ingest` hangs on first run:** the Ollama model may still be downloading (check `docker compose logs ollama-pull`), or EasyOCR is downloading its model weights on first OCR use (check `docker compose logs backend`).
+- **Ingesting a patient record fails with `Corpus 'thainer-1.4' not found` or `Can't find model 'en_core_web_sm'`:** the NER models are installed when the backend image is built; rebuild it (`docker compose build backend`). Outside Docker, run `python -c "from pythainlp.corpus import download; download('thainer-1.4', url='https://raw.githubusercontent.com/PyThaiNLP/pythainlp-corpus/master/db.json')"`.
+- **Chat says it found nothing:** the question's terms must match entity names in the graph. Try the term as the documents write it (e.g. "type 2 diabetes mellitus"), and check the documents were ingested after an Ollama model was available (0 entities per chunk means extraction failed).
 - **FalkorDB browser UI shows an empty graph:** confirm you're viewing the graph named in `FALKOR_GRAPH_NAME` (default `jivaka`), not a different/default graph.

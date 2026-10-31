@@ -24,6 +24,17 @@ class Settings(BaseSettings):
     # entities for that chunk rather than a visible failure.
     ollama_request_timeout_seconds: float = 300.0
 
+    # De-identification of patient records (jivaka.deid). NER needs the
+    # spaCy and PyThaiNLP models baked into the Docker image; turning it off
+    # leaves only the rule-based recognizers and should be for tests only.
+    deid_use_ner: bool = True
+    # Extra regexes for hospital-specific ID formats, as a JSON list, e.g.
+    # DEID_EXTRA_ID_PATTERNS='["\\b\\d{2}-\\d{6}\\b"]'. Every match becomes [ID].
+    deid_extra_id_patterns: list[str] = []
+
+    # Chat: how many chunks are given to the model as sources per answer.
+    retrieval_top_k: int = 6
+
 
 @lru_cache
 def get_settings() -> Settings:
