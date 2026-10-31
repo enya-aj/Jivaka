@@ -1,5 +1,5 @@
 import json
-from typing import Optional
+from typing import Iterator, Optional
 
 import httpx
 
@@ -25,6 +25,35 @@ class OllamaClient:
         response.raise_for_status()
         data = response.json()
         return json.loads(data["response"])
+
+    def chat_stream(self, messages: list[dict]) -> Iterator[str]:
+        """Streams an /api/chat answer, yielding text pieces as Ollama
+        produces them. Uses the same model as extraction."""
+        for attempt in range(2):
+            with self._client.stream(
+                "POST",
+                "/api/chat",
+                json={"model": self.model, "messages": messages, "stream": True},
+            ) as response:
+                if response.status_code == 404 and attempt == 0:
+                    response.read()
+                    self._pull_model()
+                    continue
+                if response.is_error:
+                    response.read()
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    if not line.strip():
+                        continue
+                    data = json.loads(line)
+                    if data.get("error"):
+                        raise RuntimeError(f"Ollama error: {data['error']}")
+                    piece = data.get("message", {}).get("content", "")
+                    if piece:
+                        yield piece
+                    if data.get("done"):
+                        return
+                return
 
     def _post_generate(self, prompt: str) -> httpx.Response:
         return self._client.post(

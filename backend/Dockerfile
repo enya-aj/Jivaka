@@ -18,6 +18,13 @@ WORKDIR /app/backend
 COPY pyproject.toml ./
 RUN poetry install --no-root --only main
 
+# ThaiNER model for patient record de-identification, baked into the image
+# so ingestion never depends on a download at runtime. The catalog URL is
+# PyThaiNLP's GitHub copy, which some networks reach when pythainlp.org isn't.
+ENV PYTHAINLP_DATA=/opt/pythainlp-data
+RUN python -c "from pythainlp.corpus import download; \
+assert download('thainer-1.4', url='https://raw.githubusercontent.com/PyThaiNLP/pythainlp-corpus/master/db.json')"
+
 COPY src ./src
 RUN poetry install --only main
 

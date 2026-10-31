@@ -63,6 +63,62 @@ def graph_show(doc_id: str = typer.Argument(..., help="Document id")) -> None:
     _print_graph(doc_id, graph)
 
 
+@app.command()
+def ask(question: str = typer.Argument(..., help="Question to answer from the graph")) -> None:
+    """Answer one question from the graph, the same way the chat page does."""
+    from jivaka.chat.service import ChatService
+    from jivaka.config import get_settings
+
+    service = ChatService(get_graph(), top_k=get_settings().retrieval_top_k)
+    sources: list[dict] = []
+    for event in service.answer([{"role": "user", "content": question}]):
+        if event.type == "sources":
+            sources = event.data
+        elif event.type == "token":
+            console.print(event.data, end="", markup=False, highlight=False)
+    console.print()
+
+    if sources:
+        table = Table(title="Sources")
+        table.add_column("#")
+        table.add_column("source")
+        table.add_column("page")
+        table.add_column("score")
+        table.add_column("text")
+        for source in sources:
+            page = source["page_number"]
+            table.add_row(
+                str(source["number"]),
+                source["source_label"],
+                "" if page is None else str(page),
+                f"{source['score']:.1f}",
+                _truncate(source["text"]),
+            )
+        console.print(table)
+
+
+@app.command(name="deid-backfill")
+def deid_backfill() -> None:
+    """De-identify patient records ingested before de-identification existed,
+    in place, and give each one a pseudonym."""
+    from jivaka.config import get_settings
+    from jivaka.deid import build_deidentifier
+    from jivaka.deid.backfill import deidentify_existing_patient_records
+
+    settings = get_settings()
+    deidentifier = build_deidentifier(settings.deid_use_ner, settings.deid_extra_id_patterns)
+    results = deidentify_existing_patient_records(get_graph(), deidentifier)
+
+    table = Table(title="Patient records")
+    table.add_column("doc_id")
+    table.add_column("pseudonym")
+    table.add_column("chunks de-identified")
+    table.add_column("entities removed")
+    for r in results:
+        table.add_row(r.doc_id, r.pseudonym, str(r.chunks_updated), str(r.entities_removed))
+    console.print(table)
+
+
 def _print_graph(doc_id: str, graph) -> None:
     dump = get_document_graph(graph, doc_id)
     if dump is None:

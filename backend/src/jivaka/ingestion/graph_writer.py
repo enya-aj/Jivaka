@@ -35,6 +35,25 @@ class GraphWriter:
             },
         )
 
+    def assign_pseudonym(self, doc_id: str) -> str:
+        """Gives a patient document a stable pseudonym ("P-0001", "P-0002",
+        ...) for chat to show instead of its filename. The counter lives in
+        the graph, so numbers keep increasing across restarts."""
+        result = self.graph.query(
+            """
+            MATCH (d:Document {id: $doc_id})
+            WITH d
+            MERGE (counter:Counter {name: 'patient_pseudonym'})
+            ON CREATE SET counter.value = 0
+            SET counter.value = CASE WHEN d.pseudonym IS NULL THEN counter.value + 1 ELSE counter.value END
+            WITH d, counter
+            SET d.pseudonym = coalesce(d.pseudonym, 'P-' + right('0000' + toString(counter.value), 4))
+            RETURN d.pseudonym
+            """,
+            params={"doc_id": doc_id},
+        )
+        return result.result_set[0][0]
+
     def mark_document_complete(self, result: IngestionResult) -> None:
         """Flags the document as fully ingested and stores its run stats, so
         a later upload of the same file can be answered from the graph
@@ -83,6 +102,7 @@ class GraphWriter:
                 c.order = $order,
                 c.source_type = $source_type,
                 c.page_number = $page_number,
+                c.deidentified = $deidentified,
                 c.created_at = $created_at
             MERGE (d)-[:HAS_CHUNK]->(c)
             """,
@@ -93,6 +113,7 @@ class GraphWriter:
                 "order": chunk.order,
                 "source_type": chunk.source_type,
                 "page_number": chunk.page_number,
+                "deidentified": chunk.deidentified,
                 "created_at": chunk.created_at.isoformat(),
             },
         )

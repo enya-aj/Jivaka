@@ -30,6 +30,14 @@ beautifulsoup4 = "^4.12.0"
 # Pure-Python MOBI unpacker - avoids needing Calibre/system tooling in the
 # Docker image just to read one ebook format.
 mobi = "^0.3.3"
+# Patient record de-identification (jivaka.deid): Thai word segmentation and
+# ThaiNER (CRF model, hence python-crfsuite), and spaCy's small English
+# model for names/places. The ThaiNER model file itself is downloaded in the
+# Dockerfile.
+pythainlp = "^5.1"
+python-crfsuite = "^0.9.11"
+spacy = "^3.8"
+en-core-web-sm = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" }
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.0"

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from jivaka.deid import Deidentifier
 from jivaka.ingestion.extraction.base import EntityExtractor
 from jivaka.ingestion.linking.stub_dictionary import StubDictionarySource
 from jivaka.ingestion.models import Chunk, ChunkExtraction, Entity, EntityRelation
@@ -84,6 +85,8 @@ def test_ingest_patient_note_end_to_end(graph):
         graph=graph,
         extractor=FakeEntityExtractor(),
         definition_source=StubDictionarySource(),
+        # Rules only, so the test doesn't need the NER models downloaded.
+        deidentifier=Deidentifier(),
     )
 
     assert result.chunk_count > 0
