@@ -117,3 +117,124 @@ def test_ingest_patient_note_end_to_end(graph):
         params={"id": result.document.id},
     ).result_set[0][0]
     assert definition_count == result.definitions_matched
+
+
+class CountingExtractor(FakeEntityExtractor):
+    def __init__(self):
+        self.calls = 0
+
+    def extract(self, chunk: Chunk) -> ChunkExtraction:
+        self.calls += 1
+        return super().extract(chunk)
+
+
+def _document_count(graph) -> int:
+    return graph.query("MATCH (d:Document) RETURN count(d)").result_set[0][0]
+
+
+def test_reingesting_same_file_reuses_existing_document(graph):
+    path = FIXTURES_DIR / "sample_patient_note.txt"
+    first = ingest_document(
+        path=path,
+        doc_type="patient_record",
+        graph=graph,
+        extractor=FakeEntityExtractor(),
+        definition_source=StubDictionarySource(),
+    )
+
+    extractor = CountingExtractor()
+    second = ingest_document(
+        path=path,
+        doc_type="patient_record",
+        graph=graph,
+        extractor=extractor,
+        definition_source=StubDictionarySource(),
+    )
+
+    assert first.duplicate is False
+    assert second.duplicate is True
+    assert second.document.id == first.document.id
+    assert extractor.calls == 0
+    assert _document_count(graph) == 1
+    assert (second.chunk_count, second.entity_count, second.relation_count) == (
+        first.chunk_count,
+        first.entity_count,
+        first.relation_count,
+    )
+    assert second.definitions_matched == first.definitions_matched
+
+
+def test_same_file_as_different_doc_type_is_ingested_separately(graph):
+    path = FIXTURES_DIR / "sample_patient_note.txt"
+    kwargs = dict(path=path, graph=graph, extractor=FakeEntityExtractor(), definition_source=StubDictionarySource())
+
+    ingest_document(doc_type="patient_record", **kwargs)
+    other = ingest_document(doc_type="textbook", **kwargs)
+
+    assert other.duplicate is False
+    assert _document_count(graph) == 2
+
+
+def test_incomplete_leftover_from_failed_run_is_replaced(graph):
+    path = FIXTURES_DIR / "sample_patient_note.txt"
+
+    class FailingExtractor(FakeEntityExtractor):
+        def extract(self, chunk: Chunk) -> ChunkExtraction:
+            raise RuntimeError("LLM went away")
+
+    with pytest.raises(RuntimeError):
+        ingest_document(
+            path=path,
+            doc_type="patient_record",
+            graph=graph,
+            extractor=FailingExtractor(),
+            definition_source=StubDictionarySource(),
+        )
+    assert _document_count(graph) == 1  # the partial document from the failed run
+
+    result = ingest_document(
+        path=path,
+        doc_type="patient_record",
+        graph=graph,
+        extractor=FakeEntityExtractor(),
+        definition_source=StubDictionarySource(),
+    )
+
+    assert result.duplicate is False
+    assert _document_count(graph) == 1
+    leftover_chunks = graph.query(
+        "MATCH (c:Chunk) WHERE c.doc_id <> $id RETURN count(c)", params={"id": result.document.id}
+    ).result_set[0][0]
+    assert leftover_chunks == 0
+
+
+def test_document_from_before_completion_flag_counts_as_existing(graph):
+    path = FIXTURES_DIR / "sample_patient_note.txt"
+    first = ingest_document(
+        path=path,
+        doc_type="patient_record",
+        graph=graph,
+        extractor=FakeEntityExtractor(),
+        definition_source=StubDictionarySource(),
+    )
+    # Simulate a document written before ingestion_complete/stats existed.
+    graph.query(
+        "MATCH (d:Document {id: $id}) REMOVE d.ingestion_complete, d.chunk_count, d.entity_count, "
+        "d.relation_count, d.definitions_matched, d.definitions_missing, d.ocr_pages_used, d.elapsed_seconds",
+        params={"id": first.document.id},
+    )
+
+    second = ingest_document(
+        path=path,
+        doc_type="patient_record",
+        graph=graph,
+        extractor=FakeEntityExtractor(),
+        definition_source=StubDictionarySource(),
+    )
+
+    assert second.duplicate is True
+    assert second.document.id == first.document.id
+    assert second.entity_count == first.entity_count
+    assert second.relation_count == first.relation_count
+    assert second.definitions_matched == first.definitions_matched
+    assert _document_count(graph) == 1

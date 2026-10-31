@@ -20,6 +20,7 @@ Edit `.env`:
 | `COMPOSE_PROFILES` | `ollama-managed` starts the bundled `ollama`/`ollama-pull` services; clear it to reuse an Ollama already running on the host (see below) | `ollama-managed` |
 | `FALKOR_PORT` / `FALKOR_UI_PORT` | Host ports published for FalkorDB's protocol / browser UI | `6379` / `3000` |
 | `BACKEND_PORT` | Host port published for the Jivaka API | `8000` |
+| `FALKOR_BIND_ADDRESS` | Host address FalkorDB's ports and the bundled Ollama listen on. Neither has a password, so keep it on localhost on any internet-facing host and use an SSH tunnel (`ssh -L 3000:localhost:3000 host`) for the browser UI | `127.0.0.1` |
 | `FALKOR_HOST` | FalkorDB hostname, as seen by the backend container | `falkordb` |
 | `FALKOR_GRAPH_NAME` | Name of the single shared graph all documents write into | `jivaka` |
 | `OLLAMA_HOST` | Ollama base URL, as seen by the backend container | `http://ollama:11434` |
@@ -193,7 +194,7 @@ Patient `Document` nodes also carry a `pseudonym`, and their `Chunk` nodes `deid
 - Entity extraction quality depends entirely on the Ollama model you choose and its prompt-following ability — there's no dedicated clinical NER model in this version.
 - One document ingests at a time per request, and each runs its own background job — there's no batch/queue-based ingestion of many documents at once, and job status is in-memory only (lost on a backend restart).
 - `.mobi` parsing quality varies by file — the unpacking library's output isn't perfectly uniform across older MOBI vs. newer hybrid (KF8/AZW3) files; treat it as best-effort until tested against real files.
-- Re-ingesting the same file (same content hash) is not deduplicated — it currently just creates another `Document` node.
+- Re-uploading the same file (same content hash and `doc_type`) doesn't create a second `Document`: the job succeeds with `"duplicate": true` and returns the existing document. A leftover from an earlier failed run of the same file is replaced. Duplicates already in the graph from before this check existed aren't cleaned up automatically.
 - Chat retrieval only matches entity names the extractor produced (plus their definitions and one relation hop); questions phrased with words that never became entities find nothing. Full-text and embedding search are planned next.
 - Each patient document gets its own pseudonym: two documents about the same person are two pseudonyms.
 - There is no login. Chat makes de-identified patient records readable to anyone who can reach the backend - see the security note in the README before exposing it.

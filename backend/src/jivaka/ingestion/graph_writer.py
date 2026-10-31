@@ -2,7 +2,7 @@ from typing import Optional
 
 from falkordb import Graph
 
-from jivaka.ingestion.models import Chunk, ChunkExtraction, Definition, Document
+from jivaka.ingestion.models import Chunk, ChunkExtraction, Definition, Document, IngestionResult
 from jivaka.ingestion.text_utils import normalize_term
 
 
@@ -22,7 +22,8 @@ class GraphWriter:
                 d.doc_type = $doc_type,
                 d.source_hash = $source_hash,
                 d.ocr_used = $ocr_used,
-                d.ingested_at = $ingested_at
+                d.ingested_at = $ingested_at,
+                d.ingestion_complete = false
             """,
             params={
                 "id": document.id,
@@ -52,6 +53,44 @@ class GraphWriter:
             params={"doc_id": doc_id},
         )
         return result.result_set[0][0]
+
+    def mark_document_complete(self, result: IngestionResult) -> None:
+        """Flags the document as fully ingested and stores its run stats, so
+        a later upload of the same file can be answered from the graph
+        without re-running extraction."""
+        self.graph.query(
+            """
+            MATCH (d:Document {id: $id})
+            SET d.ingestion_complete = true,
+                d.chunk_count = $chunk_count,
+                d.entity_count = $entity_count,
+                d.relation_count = $relation_count,
+                d.definitions_matched = $definitions_matched,
+                d.definitions_missing = $definitions_missing,
+                d.ocr_pages_used = $ocr_pages_used,
+                d.elapsed_seconds = $elapsed_seconds
+            """,
+            params={
+                "id": result.document.id,
+                "chunk_count": result.chunk_count,
+                "entity_count": result.entity_count,
+                "relation_count": result.relation_count,
+                "definitions_matched": result.definitions_matched,
+                "definitions_missing": result.definitions_missing,
+                "ocr_pages_used": result.ocr_pages_used,
+                "elapsed_seconds": result.elapsed_seconds,
+            },
+        )
+
+    def delete_document(self, doc_id: str) -> None:
+        """Removes a document and its own Chunk/Entity nodes. Definition
+        nodes are shared across documents, so they're left in place."""
+        for cypher in (
+            "MATCH (e:Entity {doc_id: $doc_id}) DETACH DELETE e",
+            "MATCH (c:Chunk {doc_id: $doc_id}) DETACH DELETE c",
+            "MATCH (d:Document {id: $doc_id}) DETACH DELETE d",
+        ):
+            self.graph.query(cypher, params={"doc_id": doc_id})
 
     def write_chunk(self, chunk: Chunk) -> None:
         self.graph.query(

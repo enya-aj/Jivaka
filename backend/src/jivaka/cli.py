@@ -34,7 +34,12 @@ def ingest(
     graph = get_graph()
     result = ingest_document(path=path, doc_type=doc_type.value, graph=graph)
 
-    table = Table(title=f"Ingested {result.document.filename}")
+    if result.duplicate:
+        console.print(
+            f"[yellow]{result.document.filename} was already ingested; reusing the existing document.[/yellow]"
+        )
+    title = "Existing" if result.duplicate else "Ingested"
+    table = Table(title=f"{title} {result.document.filename}")
     table.add_column("Field")
     table.add_column("Value")
     table.add_row("doc_id", result.document.id)

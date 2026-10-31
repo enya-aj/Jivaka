@@ -48,6 +48,9 @@ def _run_ingest_job(job_id: str, path: Path, doc_type: DocType) -> None:
     try:
         graph = get_graph()
         result = ingest_document(path=path, doc_type=doc_type, graph=graph, on_progress=on_progress)
+        if result.duplicate:
+            # Already ingested from an identical file, so this copy isn't needed.
+            path.unlink(missing_ok=True)
         job_registry.update_job(job_id, status=job_registry.JobStatus.succeeded, result=result)
     except Exception as exc:
         job_registry.update_job(job_id, status=job_registry.JobStatus.failed, error=str(exc))
