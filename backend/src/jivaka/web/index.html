@@ -280,7 +280,11 @@ async function pollJob(jobId) {
     document.getElementById("submit-btn").disabled = false;
 
     if (job.status === "succeeded") {
-      setStatus(`<span class="success">Done.</span>`);
+      if (job.result.duplicate) {
+        setStatus(`<span class="success">Already ingested: this file was uploaded before, so it's showing the existing document instead of adding a copy.</span>`);
+      } else {
+        setStatus(`<span class="success">Done.</span>`);
+      }
       await showGraph(job.result.document.id, job.result);
       loadRecentDocuments();
     } else if (job.status === "failed") {

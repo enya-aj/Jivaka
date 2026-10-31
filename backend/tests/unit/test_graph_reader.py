@@ -1,4 +1,4 @@
-from jivaka.db.graph_reader import list_documents
+from jivaka.db.graph_reader import find_documents_by_hash, list_documents
 
 
 class FakeNode:
@@ -46,3 +46,15 @@ def test_list_documents_default_limit():
     assert result == []
     _, params = graph.calls[0]
     assert params["limit"] == 50
+
+
+def test_find_documents_by_hash_filters_on_hash_and_doc_type():
+    doc = {"id": "doc-1", "source_hash": "abc", "doc_type": "textbook", "ingestion_complete": True}
+    graph = FakeGraph(result_set=[[FakeNode(doc)]])
+
+    result = find_documents_by_hash(graph, "abc", "textbook")
+
+    assert result == [doc]
+    cypher, params = graph.calls[0]
+    assert "source_hash: $source_hash" in cypher and "doc_type: $doc_type" in cypher
+    assert params == {"source_hash": "abc", "doc_type": "textbook"}

@@ -1,11 +1,18 @@
 services:
   falkordb:
     image: falkordb/falkordb:latest
+    # Bound to localhost by default: FalkorDB has no password, and an open
+    # 6379 gets found and abused by internet scanners within days. The
+    # backend reaches it over the compose network either way. Use an SSH
+    # tunnel to reach the browser UI from another machine.
     ports:
-      - "${FALKOR_PORT:-6379}:6379"
-      - "${FALKOR_UI_PORT:-3000}:3000"
+      - "${FALKOR_BIND_ADDRESS:-127.0.0.1}:${FALKOR_PORT:-6379}:6379"
+      - "${FALKOR_BIND_ADDRESS:-127.0.0.1}:${FALKOR_UI_PORT:-3000}:3000"
     volumes:
-      - falkordb_data:/data
+      # The image saves dump.rdb under /var/lib/falkordb/data (/data/data is
+      # only a symlink to it), so the volume has to be mounted there for the
+      # graph to survive the container being recreated.
+      - falkordb_data:/var/lib/falkordb/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -20,7 +27,7 @@ services:
     image: ollama/ollama:latest
     profiles: ["ollama-managed"]
     ports:
-      - "11434:11434"
+      - "${FALKOR_BIND_ADDRESS:-127.0.0.1}:11434:11434"
     volumes:
       - ollama_models:/root/.ollama
     healthcheck:
