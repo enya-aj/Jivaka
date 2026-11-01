@@ -29,6 +29,11 @@ from jivaka.ingestion.ocr.easyocr_backend import ocr_image
 _hash_locks: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)
 
 
+class IngestionCancelled(Exception):
+    """Raised from an on_progress/on_document callback to stop an ingest.
+    The pipeline deletes the partly written document before re-raising."""
+
+
 def ingest_document(
     path: Path,
     doc_type: DocType,
@@ -37,9 +42,14 @@ def ingest_document(
     definition_source: Optional[DefinitionSource] = None,
     on_progress: Optional[Callable[[int, int], None]] = None,
     deidentifier: Optional[Deidentifier] = None,
+    on_document: Optional[Callable[[str], None]] = None,
 ) -> IngestionResult:
     """Orchestrates intake -> OCR fallback -> chunking -> entity extraction
-    -> definition linking -> graph write for a single document."""
+    -> definition linking -> graph write for a single document.
+
+    on_document(doc_id) is called once the Document node is written, and
+    on_progress(done, total) after each chunk (with done=0 once chunking is
+    finished). Either may raise IngestionCancelled to stop the run."""
     start = time.monotonic()
     settings = get_settings()
     extractor = extractor or LLMEntityExtractor()
@@ -55,7 +65,16 @@ def ingest_document(
         if existing is not None:
             return _result_from_existing(graph, existing, elapsed=time.monotonic() - start)
         return _ingest_loaded(
-            loaded, doc_type, writer, extractor, definition_source, settings, on_progress, start, deidentifier
+            loaded,
+            doc_type,
+            writer,
+            extractor,
+            definition_source,
+            settings,
+            on_progress,
+            start,
+            deidentifier,
+            on_document,
         )
 
 
@@ -120,6 +139,7 @@ def _ingest_loaded(
     on_progress: Optional[Callable[[int, int], None]],
     start: float,
     deidentifier: Optional[Deidentifier],
+    on_document: Optional[Callable[[str], None]] = None,
 ) -> IngestionResult:
     ocr_pages_used = 0
     page_texts: list[str] = []
@@ -149,35 +169,43 @@ def _ingest_loaded(
         ocr_used=ocr_pages_used > 0,
     )
     writer.write_document(document)
-    if is_patient_record:
-        writer.assign_pseudonym(document.id)
+    try:
+        if on_document:
+            on_document(document.id)
+        if is_patient_record:
+            writer.assign_pseudonym(document.id)
 
-    chunker = get_chunker(doc_type)
-    chunks = chunker.chunk(document.id, full_text)
-    for chunk in chunks:
-        chunk.deidentified = is_patient_record
-
-    entity_count = 0
-    relation_count = 0
-    definitions_matched = 0
-    definitions_missing = 0
-
-    for i, chunk in enumerate(chunks, start=1):
-        writer.write_chunk(chunk)
-        extraction = extractor.extract(chunk)
-        definitions_by_entity_id = {
-            entity.id: definition_source.lookup(entity.normalized_name, entity.entity_type)
-            for entity in extraction.entities
-        }
-        e_count, r_count, d_matched, d_missing = writer.write_chunk_extraction(
-            extraction, definitions_by_entity_id
-        )
-        entity_count += e_count
-        relation_count += r_count
-        definitions_matched += d_matched
-        definitions_missing += d_missing
+        chunker = get_chunker(doc_type)
+        chunks = chunker.chunk(document.id, full_text)
+        for chunk in chunks:
+            chunk.deidentified = is_patient_record
         if on_progress:
-            on_progress(i, len(chunks))
+            on_progress(0, len(chunks))
+
+        entity_count = 0
+        relation_count = 0
+        definitions_matched = 0
+        definitions_missing = 0
+
+        for i, chunk in enumerate(chunks, start=1):
+            writer.write_chunk(chunk)
+            extraction = extractor.extract(chunk)
+            definitions_by_entity_id = {
+                entity.id: definition_source.lookup(entity.normalized_name, entity.entity_type)
+                for entity in extraction.entities
+            }
+            e_count, r_count, d_matched, d_missing = writer.write_chunk_extraction(
+                extraction, definitions_by_entity_id
+            )
+            entity_count += e_count
+            relation_count += r_count
+            definitions_matched += d_matched
+            definitions_missing += d_missing
+            if on_progress:
+                on_progress(i, len(chunks))
+    except IngestionCancelled:
+        writer.delete_document(document.id)
+        raise
 
     elapsed = time.monotonic() - start
 
