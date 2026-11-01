@@ -265,3 +265,114 @@ def test_cancelled_ingest_removes_what_it_wrote(graph):
     for label in ("Document", "Chunk", "Entity"):
         count = graph.query(f"MATCH (n:{label}) RETURN count(n)").result_set[0][0]
         assert count == 0, label
+
+
+def _write_long_textbook(tmp_path) -> Path:
+    paragraphs = [
+        f"Section {i}. Pneumonia with fever is treated with amoxicillin. " + "Supportive care matters. " * 60
+        for i in range(6)
+    ]
+    path = tmp_path / "long_textbook.txt"
+    path.write_text("\n\n".join(paragraphs))
+    return path
+
+
+def _uninterrupted_run(graph, kwargs):
+    """Counts from a run that never stopped, removed again afterwards."""
+    from jivaka.ingestion.graph_writer import GraphWriter
+
+    result = ingest_document(extractor=FakeEntityExtractor(), **kwargs)
+    GraphWriter(graph).delete_document(result.document.id)
+    return result
+
+
+def _assert_same_counts(resumed, baseline):
+    fields = ("chunk_count", "entity_count", "relation_count", "definitions_matched", "definitions_missing")
+    assert [getattr(resumed, f) for f in fields] == [getattr(baseline, f) for f in fields]
+
+
+def _kill_after(chunks_done: int):
+    """Simulates the backend dying partway: stops the run after the given
+    number of chunks without the cleanup a user's Cancel does."""
+
+    def on_progress(done: int, total: int) -> None:
+        if done >= chunks_done:
+            raise KeyboardInterrupt()
+
+    return on_progress
+
+
+def test_reupload_resumes_interrupted_ingest(graph, tmp_path):
+    path = _write_long_textbook(tmp_path)
+    kwargs = dict(path=path, doc_type="textbook", graph=graph, definition_source=StubDictionarySource())
+    baseline = _uninterrupted_run(graph, kwargs)
+
+    with pytest.raises(KeyboardInterrupt):
+        ingest_document(extractor=FakeEntityExtractor(), on_progress=_kill_after(3), **kwargs)
+    interrupted_id = graph.query("MATCH (d:Document) RETURN d.id").result_set[0][0]
+
+    extractor = CountingExtractor()
+    resumed = ingest_document(extractor=extractor, **kwargs)
+    fresh = ingest_document(**{**kwargs, "doc_type": "patient_record"}, extractor=FakeEntityExtractor(),
+                            deidentifier=Deidentifier())
+
+    assert resumed.document.id == interrupted_id
+    assert resumed.resumed_chunks == 3
+    assert extractor.calls == resumed.chunk_count - 3
+    assert _document_count(graph) == 2
+    # Counts match a run that never stopped, and nothing is left doubled up.
+    assert resumed.chunk_count > 3
+    _assert_same_counts(resumed, baseline)
+    chunk_orders = graph.query(
+        "MATCH (:Document {id: $id})-[:HAS_CHUNK]->(c:Chunk) RETURN c.order ORDER BY c.order",
+        params={"id": resumed.document.id},
+    ).result_set
+    assert [row[0] for row in chunk_orders] == list(range(resumed.chunk_count))
+    entities = graph.query(
+        "MATCH (:Chunk {doc_id: $id})-[:MENTIONS]->(e:Entity) RETURN count(e)", params={"id": resumed.document.id}
+    ).result_set[0][0]
+    assert entities == resumed.entity_count
+    assert fresh.resumed_chunks == 0
+
+
+def test_resume_redoes_the_chunk_that_was_cut_off(graph, tmp_path):
+    path = _write_long_textbook(tmp_path)
+    kwargs = dict(path=path, doc_type="textbook", graph=graph, definition_source=StubDictionarySource())
+    baseline = _uninterrupted_run(graph, kwargs)
+
+    class DiesMidChunk(FakeEntityExtractor):
+        calls = 0
+
+        def extract(self, chunk):
+            self.calls += 1
+            if self.calls == 3:
+                raise KeyboardInterrupt()
+            return super().extract(chunk)
+
+    with pytest.raises(KeyboardInterrupt):
+        ingest_document(extractor=DiesMidChunk(), **kwargs)
+    # Chunk 3 was written but never extracted.
+    assert graph.query("MATCH (c:Chunk) RETURN count(c)").result_set[0][0] == 3
+
+    resumed = ingest_document(extractor=FakeEntityExtractor(), **kwargs)
+
+    assert resumed.resumed_chunks == 2
+    _assert_same_counts(resumed, baseline)
+    assert graph.query("MATCH (c:Chunk) RETURN count(c)").result_set[0][0] == resumed.chunk_count
+
+
+def test_resume_works_for_documents_from_before_the_chunk_flag(graph, tmp_path):
+    path = _write_long_textbook(tmp_path)
+    kwargs = dict(path=path, doc_type="textbook", graph=graph, definition_source=StubDictionarySource())
+    baseline = _uninterrupted_run(graph, kwargs)
+
+    with pytest.raises(KeyboardInterrupt):
+        ingest_document(extractor=FakeEntityExtractor(), on_progress=_kill_after(3), **kwargs)
+    graph.query("MATCH (c:Chunk) REMOVE c.extracted")
+
+    extractor = CountingExtractor()
+    resumed = ingest_document(extractor=extractor, **kwargs)
+
+    # Without the flag, the last chunk written is assumed unfinished and redone.
+    assert resumed.resumed_chunks == 2
+    _assert_same_counts(resumed, baseline)

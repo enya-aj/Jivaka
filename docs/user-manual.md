@@ -143,6 +143,14 @@ curl http://localhost:8000/jobs/<job_id>
 
 `GET /documents` lists previously ingested documents (`id`, `filename`, `doc_type`, `ingested_at`, newest first) — what the web page's "recent documents" panel uses.
 
+A backend restart kills any running ingest; its document stays in the graph with `status: "incomplete"` (shown as *interrupted* on the page). Uploading the same file again with the same `doc_type` **continues where it stopped**: chunks whose extraction had finished are kept, and only the rest go to the LLM (the job's `result.resumed_chunks` says how many were reused). To discard an interrupted document instead, use its **Delete** button or:
+
+```bash
+curl -X DELETE http://localhost:8000/documents/<doc_id>
+```
+
+This only deletes interrupted documents (409 for finished ones, or while an ingest is still writing it; cancel that job instead).
+
 There is no authentication on this API — it's for local verification only, not production/public exposure.
 
 ## 7. Asking questions (chat)
