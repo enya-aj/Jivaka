@@ -8,6 +8,7 @@ from jivaka.api import jobs as job_registry
 from jivaka.config import get_settings
 from jivaka.db.falkor_client import get_graph
 from jivaka.db.graph_reader import get_document_graph, list_documents
+from jivaka.ingestion.graph_writer import GraphWriter
 from jivaka.ingestion.intake import SUPPORTED_EXTENSIONS
 from jivaka.ingestion.models import DocType
 from jivaka.ingestion.pipeline import IngestionCancelled, ingest_document
@@ -118,6 +119,23 @@ async def list_documents_endpoint(limit: int = 50) -> list[dict]:
         # was interrupted; documents older than that flag don't carry it.
         doc["status"] = "incomplete" if doc.get("ingestion_complete") is False else "done"
     return docs
+
+
+@router.delete("/documents/{doc_id}")
+async def delete_document_endpoint(doc_id: str) -> dict:
+    """Deletes an interrupted document (one whose ingest stopped before
+    finishing) with its chunks and entities. Finished documents and ones an
+    ingest is still writing can't be deleted here."""
+    if any(job.doc_id == doc_id for job in job_registry.list_jobs() if job.status in job_registry.ACTIVE_STATUSES):
+        raise HTTPException(status_code=409, detail="This document is still being ingested. Cancel the ingest instead.")
+    graph = get_graph()
+    rows = graph.query("MATCH (d:Document {id: $id}) RETURN d.ingestion_complete", params={"id": doc_id}).result_set
+    if not rows:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if rows[0][0] is not False:
+        raise HTTPException(status_code=409, detail="Only interrupted documents can be deleted.")
+    GraphWriter(graph).delete_document(doc_id)
+    return {"deleted": doc_id}
 
 
 @router.get("/documents/{doc_id}/graph")

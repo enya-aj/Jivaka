@@ -86,3 +86,6 @@ class IngestionResult(BaseModel):
     # True when this file (same content hash + doc_type) was already fully
     # ingested: `document` is the existing one and nothing new was written.
     duplicate: bool = False
+    # Chunks reused from an interrupted earlier run of the same file instead
+    # of being extracted again.
+    resumed_chunks: int = 0

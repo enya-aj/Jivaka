@@ -92,6 +92,19 @@ class GraphWriter:
         ):
             self.graph.query(cypher, params={"doc_id": doc_id})
 
+    def delete_chunk(self, chunk_id: str) -> None:
+        """Removes one chunk and the entities extracted from it (used when a
+        resumed ingest redoes a chunk the interrupted run hadn't finished)."""
+        self.graph.query(
+            "MATCH (c:Chunk {id: $chunk_id}) OPTIONAL MATCH (c)-[:MENTIONS]->(e:Entity) DETACH DELETE e, c",
+            params={"chunk_id": chunk_id},
+        )
+
+    def mark_chunk_extracted(self, chunk_id: str) -> None:
+        """Records that a chunk's entities, relations and definitions are all
+        written, so an interrupted ingest can resume after it."""
+        self.graph.query("MATCH (c:Chunk {id: $chunk_id}) SET c.extracted = true", params={"chunk_id": chunk_id})
+
     def write_chunk(self, chunk: Chunk) -> None:
         self.graph.query(
             """

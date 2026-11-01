@@ -133,3 +133,42 @@ def test_ingest_rejects_unsupported_file_type(monkeypatch, tmp_path):
     assert response.status_code == 400
     assert "Unsupported file type '.pptx'" in response.json()["detail"]
     assert list(tmp_path.iterdir()) == []
+
+
+class _FakeDeleteGraph:
+    def __init__(self, complete):
+        self.complete = complete
+        self.queries = []
+
+    def query(self, cypher, params=None):
+        self.queries.append(cypher)
+        rows = [] if self.complete == "missing" else [[self.complete]]
+        return type("R", (), {"result_set": rows if "RETURN d.ingestion_complete" in cypher else []})()
+
+
+def test_delete_removes_an_interrupted_document(monkeypatch):
+    graph = _FakeDeleteGraph(complete=False)
+    monkeypatch.setattr(routes, "get_graph", lambda: graph)
+
+    response = TestClient(app).delete("/documents/doc-1")
+
+    assert response.status_code == 200
+    assert any("DETACH DELETE d" in q for q in graph.queries)
+
+
+def test_delete_refuses_finished_missing_and_running_documents(monkeypatch):
+    client = TestClient(app)
+    for complete, expected in ((True, 409), (None, 409), ("missing", 404)):
+        graph = _FakeDeleteGraph(complete=complete)
+        monkeypatch.setattr(routes, "get_graph", lambda: graph)
+        assert client.delete("/documents/doc-1").status_code == expected
+        assert not any("DETACH DELETE" in q for q in graph.queries)
+
+    job = routes.job_registry.create_job(filename="big.pdf", doc_type="textbook")
+    routes.job_registry.update_job(job.id, status=routes.job_registry.JobStatus.running, doc_id="doc-running")
+    graph = _FakeDeleteGraph(complete=False)
+    monkeypatch.setattr(routes, "get_graph", lambda: graph)
+    response = client.delete("/documents/doc-running")
+    assert response.status_code == 409
+    assert "Cancel" in response.json()["detail"]
+    routes.job_registry.update_job(job.id, status=routes.job_registry.JobStatus.cancelled)

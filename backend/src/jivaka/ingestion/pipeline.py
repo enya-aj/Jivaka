@@ -61,10 +61,11 @@ def ingest_document(
     loaded = load_document(path)
 
     with _hash_locks[loaded.source_hash]:
-        existing = _find_completed_duplicate(graph, writer, loaded.source_hash, doc_type)
+        existing, interrupted = _find_existing(graph, writer, loaded.source_hash, doc_type)
         if existing is not None:
             return _result_from_existing(graph, existing, elapsed=time.monotonic() - start)
         return _ingest_loaded(
+            graph,
             loaded,
             doc_type,
             writer,
@@ -75,24 +76,74 @@ def ingest_document(
             start,
             deidentifier,
             on_document,
+            resume_from=interrupted,
         )
 
 
-def _find_completed_duplicate(
+def _find_existing(
     graph: Graph, writer: GraphWriter, source_hash: str, doc_type: DocType
-) -> Optional[dict]:
-    """Returns an already fully ingested document for this content, if any.
-    Documents left incomplete by a failed/interrupted earlier run are deleted
-    so the re-upload replaces them instead of sitting next to them."""
+) -> tuple[Optional[dict], Optional[dict]]:
+    """Returns (completed, interrupted) documents for this content.
+
+    `completed` is an already fully ingested document, if any. Otherwise
+    `interrupted` is the most recent document left incomplete by a failed or
+    killed earlier run, which the new run resumes. Any other incomplete
+    copies are deleted so they don't sit next to the resumed one."""
     completed = None
+    incomplete: list[dict] = []
     for props in find_documents_by_hash(graph, source_hash, doc_type):
         if props.get("ingestion_complete") is False:
-            writer.delete_document(props["id"])
+            incomplete.append(props)
         elif completed is None:
             # Documents from before the completion flag existed have no
             # ingestion_complete property; treat them as complete.
             completed = props
-    return completed
+
+    if completed is not None:
+        for props in incomplete:
+            writer.delete_document(props["id"])
+        return completed, None
+
+    interrupted = incomplete[-1] if incomplete else None  # ordered by ingested_at
+    for props in incomplete[:-1]:
+        writer.delete_document(props["id"])
+    return None, interrupted
+
+
+def _finished_chunks(graph: Graph, doc_id: str) -> tuple[dict[int, dict], list[dict]]:
+    """Returns (finished chunks by order, all existing chunks) of a document
+    from an interrupted run. A chunk is finished once its extraction was
+    fully written. Chunks written before that was recorded carry no flag;
+    for those, every chunk but the last one was finished, since chunks are
+    processed one after another."""
+    rows = graph.query(
+        "MATCH (:Document {id: $doc_id})-[:HAS_CHUNK]->(c:Chunk) "
+        "RETURN c.id, c.order, c.text, c.extracted ORDER BY c.order",
+        params={"doc_id": doc_id},
+    ).result_set
+    chunks = [{"id": r[0], "order": r[1], "text": r[2], "extracted": r[3]} for r in rows]
+    if any(c["extracted"] is not None for c in chunks):
+        finished = [c for c in chunks if c["extracted"]]
+    else:
+        last_order = max((c["order"] for c in chunks), default=-1)
+        finished = [c for c in chunks if c["order"] < last_order]
+    return {c["order"]: c for c in finished}, chunks
+
+
+def _chunk_stats(graph: Graph, doc_id: str) -> dict[str, tuple[int, int, int]]:
+    """(entities, relations, entities with a definition) per chunk id, for
+    counting the chunks a resumed run skips."""
+    stats: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0])
+    queries = (
+        "MATCH (c:Chunk {doc_id: $doc_id})-[:MENTIONS]->(e:Entity) RETURN c.id, count(e)",
+        "MATCH (c:Chunk {doc_id: $doc_id})-[:MENTIONS]->(:Entity)-[r:RELATED_TO]->(:Entity) RETURN c.id, count(r)",
+        "MATCH (c:Chunk {doc_id: $doc_id})-[:MENTIONS]->(e:Entity)-[:DEFINED_AS]->(:Definition) "
+        "RETURN c.id, count(DISTINCT e)",
+    )
+    for index, cypher in enumerate(queries):
+        for chunk_id, count in graph.query(cypher, params={"doc_id": doc_id}).result_set:
+            stats[chunk_id][index] = count
+    return {chunk_id: tuple(values) for chunk_id, values in stats.items()}
 
 
 def _result_from_existing(graph: Graph, props: dict, elapsed: float) -> IngestionResult:
@@ -130,6 +181,7 @@ def _result_from_existing(graph: Graph, props: dict, elapsed: float) -> Ingestio
 
 
 def _ingest_loaded(
+    graph: Graph,
     loaded: LoadedDocument,
     doc_type: DocType,
     writer: GraphWriter,
@@ -140,6 +192,7 @@ def _ingest_loaded(
     start: float,
     deidentifier: Optional[Deidentifier],
     on_document: Optional[Callable[[str], None]] = None,
+    resume_from: Optional[dict] = None,
 ) -> IngestionResult:
     ocr_pages_used = 0
     page_texts: list[str] = []
@@ -168,6 +221,10 @@ def _ingest_loaded(
         source_hash=loaded.source_hash,
         ocr_used=ocr_pages_used > 0,
     )
+    if resume_from is not None:
+        # Continue the interrupted run's document rather than starting over.
+        document.id = resume_from["id"]
+        document.ingested_at = datetime.fromisoformat(resume_from["ingested_at"])
     writer.write_document(document)
     try:
         if on_document:
@@ -186,8 +243,38 @@ def _ingest_loaded(
         relation_count = 0
         definitions_matched = 0
         definitions_missing = 0
+        resumed_chunks = 0
+
+        finished: dict[int, dict] = {}
+        existing_chunks: list[dict] = []
+        stats: dict[str, tuple[int, int, int]] = {}
+        if resume_from is not None:
+            finished, existing_chunks = _finished_chunks(graph, document.id)
+            stats = _chunk_stats(graph, document.id)
+            # Drop chunks that won't be reused: unfinished ones, and any that
+            # no longer match (e.g. the chunking settings changed).
+            for old in existing_chunks:
+                done = finished.get(old["order"])
+                still_matches = (
+                    done is not None and old["order"] < len(chunks) and chunks[old["order"]].text == old["text"]
+                )
+                if not still_matches:
+                    finished.pop(old["order"], None)
+                    writer.delete_chunk(old["id"])
 
         for i, chunk in enumerate(chunks, start=1):
+            done = finished.get(chunk.order)
+            if done is not None:
+                e_count, r_count, d_matched = stats.get(done["id"], (0, 0, 0))
+                entity_count += e_count
+                relation_count += r_count
+                definitions_matched += d_matched
+                definitions_missing += e_count - d_matched
+                resumed_chunks += 1
+                if on_progress:
+                    on_progress(i, len(chunks))
+                continue
+
             writer.write_chunk(chunk)
             extraction = extractor.extract(chunk)
             definitions_by_entity_id = {
@@ -201,6 +288,7 @@ def _ingest_loaded(
             relation_count += r_count
             definitions_matched += d_matched
             definitions_missing += d_missing
+            writer.mark_chunk_extracted(chunk.id)
             if on_progress:
                 on_progress(i, len(chunks))
     except IngestionCancelled:
@@ -218,6 +306,7 @@ def _ingest_loaded(
         definitions_missing=definitions_missing,
         ocr_pages_used=ocr_pages_used,
         elapsed_seconds=elapsed,
+        resumed_chunks=resumed_chunks,
     )
     writer.mark_document_complete(result)
     return result

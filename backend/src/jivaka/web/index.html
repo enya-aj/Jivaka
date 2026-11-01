@@ -230,6 +230,19 @@ function jobRow(job) {
   return item;
 }
 
+async function deleteDocument(doc) {
+  const name = displayName(doc.filename) || doc.id;
+  if (!confirm(`Delete the interrupted ingest of ${name}? Everything it added to the graph will be removed.`)) return;
+  const res = await fetch(`${API}/documents/${doc.id}`, { method: "DELETE" });
+  if (res.ok) {
+    setStatusText("", `Deleted: ${name}.`);
+  } else {
+    const body = await res.json().catch(() => ({}));
+    setStatusText("error", body.detail || `Could not delete ${name}.`);
+  }
+  loadRecentDocuments();
+}
+
 function docRow(doc) {
   const status = doc.status === "incomplete" ? "interrupted" : "done";
   const item = el("li", {}, [
@@ -239,7 +252,15 @@ function docRow(doc) {
       el("span", { text: `${doc.doc_type} · ${formatTime(doc.ingested_at)}` }),
     ]),
   ]);
-  if (status === "interrupted") item.title = "Ingestion stopped before finishing (for example the server restarted). Upload the file again to redo it.";
+  if (status === "interrupted") {
+    item.title = "Ingestion stopped before finishing (for example the server restarted). Upload the same file again to continue where it stopped, or delete it.";
+    const btn = el("button", { class: "link", type: "button", text: "Delete" });
+    btn.addEventListener("click", (evt) => {
+      evt.stopPropagation();
+      deleteDocument(doc);
+    });
+    item.querySelector(".meta").appendChild(btn);
+  }
   item.addEventListener("click", () => showGraph(doc.id));
   return item;
 }
@@ -254,7 +275,9 @@ async function handleFinishedJobs(jobs) {
         "success",
         job.result.duplicate
           ? `Already ingested: ${name} was uploaded before, so it's showing the existing document instead of adding a copy.`
-          : `Done: ${name}.`
+          : job.result.resumed_chunks
+            ? `Done: ${name}. Continued where the earlier run stopped (${job.result.resumed_chunks} of ${job.result.chunk_count} chunks were already done).`
+            : `Done: ${name}.`
       );
       await showGraph(job.result.document.id, job.result);
     } else if (job.status === "failed") {
@@ -315,6 +338,7 @@ function renderSummary(result) {
     ["definitions matched", result.definitions_matched],
     ["definitions missing", result.definitions_missing],
     ["OCR pages used", result.ocr_pages_used],
+    ...(result.resumed_chunks ? [["chunks reused from earlier run", result.resumed_chunks]] : []),
     ["elapsed (s)", result.elapsed_seconds.toFixed(2)],
   ];
   for (const [label, value] of rows) {
