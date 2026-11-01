@@ -47,14 +47,22 @@ def group_by_max_chars(paragraphs: list[str], max_chars: int) -> list[str]:
 
 
 def _split_long_paragraph(paragraph: str, max_chars: int) -> list[str]:
-    sentences = _SENTENCE_BOUNDARY_RE.split(paragraph)
+    # Split on line breaks as well as sentence ends, so structured records
+    # ("field: value" lines from JSON/XML/CSV, which have no full stops) are
+    # also cut into pieces; line breaks are kept within each piece.
+    pieces: list[tuple[str, str]] = []
+    for line in paragraph.split("\n"):
+        for i, sentence in enumerate(_SENTENCE_BOUNDARY_RE.split(line)):
+            if sentence.strip():
+                pieces.append((" " if i else "\n", sentence.strip()))
+
     blocks: list[str] = []
     current = ""
-    for sentence in sentences:
-        if current and len(current) + len(sentence) + 1 > max_chars:
+    for separator, piece in pieces:
+        if current and len(current) + len(piece) + 1 > max_chars:
             blocks.append(current.strip())
             current = ""
-        current = f"{current} {sentence}".strip()
+        current = f"{current}{separator}{piece}" if current else piece
     if current:
         blocks.append(current.strip())
     return blocks

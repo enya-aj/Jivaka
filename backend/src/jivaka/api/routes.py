@@ -8,6 +8,7 @@ from jivaka.api import jobs as job_registry
 from jivaka.config import get_settings
 from jivaka.db.falkor_client import get_graph
 from jivaka.db.graph_reader import get_document_graph, list_documents
+from jivaka.ingestion.intake import SUPPORTED_EXTENSIONS
 from jivaka.ingestion.models import DocType
 from jivaka.ingestion.pipeline import IngestionCancelled, ingest_document
 
@@ -24,6 +25,13 @@ async def ingest_endpoint(
     than blocking the request - ingestion can take minutes (LLM calls per
     chunk), so poll GET /jobs/{job_id} for status/progress/result instead of
     waiting on this response."""
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type '{suffix or '(none)'}'. Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}",
+        )
+
     settings = get_settings()
     upload_dir = Path(settings.upload_dir)
     upload_dir.mkdir(parents=True, exist_ok=True)

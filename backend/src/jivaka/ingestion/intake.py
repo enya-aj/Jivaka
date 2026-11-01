@@ -10,11 +10,15 @@ from bs4 import BeautifulSoup
 from ebooklib import epub
 from pydantic import BaseModel
 
-TEXT_EXTENSIONS = {".txt"}
+from jivaka.ingestion.readers import STRUCTURED_TEXT_EXTENSIONS, decode_text, read_structured_text
+
+TEXT_EXTENSIONS = {".txt", ".text"}
 PDF_EXTENSIONS = {".pdf"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tiff"}
 EBOOK_EXTENSIONS = {".epub", ".mobi"}
-SUPPORTED_EXTENSIONS = TEXT_EXTENSIONS | PDF_EXTENSIONS | IMAGE_EXTENSIONS | EBOOK_EXTENSIONS
+SUPPORTED_EXTENSIONS = (
+    TEXT_EXTENSIONS | PDF_EXTENSIONS | IMAGE_EXTENSIONS | EBOOK_EXTENSIONS | STRUCTURED_TEXT_EXTENSIONS
+)
 
 
 class UnsupportedFileTypeError(ValueError):
@@ -46,7 +50,11 @@ def load_document(path: Path) -> LoadedDocument:
     source_hash = _sha256(raw)
 
     if suffix in TEXT_EXTENSIONS:
-        pages = [PageInput(page_number=1, text=raw.decode("utf-8", errors="replace"))]
+        pages = [PageInput(page_number=1, text=decode_text(raw))]
+    elif suffix in STRUCTURED_TEXT_EXTENSIONS:
+        # HTML, XML, JSON, Markdown and CSV/TSV are read into plain text, so
+        # like ebooks they carry no image for the OCR fallback.
+        pages = [PageInput(page_number=1, text=read_structured_text(suffix, raw))]
     elif suffix in PDF_EXTENSIONS:
         pages = _load_pdf(raw)
     elif suffix in IMAGE_EXTENSIONS:

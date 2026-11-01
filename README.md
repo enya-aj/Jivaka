@@ -2,7 +2,7 @@
 
 Jivaka is a medical knowledge tool built around a three-tier "trinity" knowledge graph — **Chunks** (patient records / textbook passages) → **Entities** (symptoms, diagnoses, treatments) → **Definitions** (verified MeSH/UMLS-style dictionary entries) — stored in [FalkorDB](https://www.falkordb.com/).
 
-This repository implements the **ingestion foundation** - turning one uploaded medical document (PDF, text, image, EPUB, or MOBI) into its portion of the trinity graph, with patient records de-identified first - and a **chat page** that answers Thai or English questions from the whole graph, citing the chunks it used. Document intake, OCR fallback, de-identification, chunking, entity extraction (via a local Ollama LLM), definition linking, graph retrieval and streamed, cited answers are implemented.
+This repository implements the **ingestion foundation** - turning one uploaded medical document (PDF, plain text, Markdown, HTML, XML, JSON/JSON Lines, CSV/TSV, image, EPUB, or MOBI) into its portion of the trinity graph, with patient records de-identified first - and a **chat page** that answers Thai or English questions from the whole graph, citing the chunks it used. Document intake, OCR fallback, de-identification, chunking, entity extraction (via a local Ollama LLM), definition linking, graph retrieval and streamed, cited answers are implemented.
 
 See [docs/user-manual.md](docs/user-manual.md) for detailed setup and usage instructions.
 
