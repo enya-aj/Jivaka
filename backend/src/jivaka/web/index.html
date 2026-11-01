@@ -13,6 +13,7 @@
     --accent: #2563eb;
     --danger: #dc2626;
     --success: #16a34a;
+    --warning: #b45309;
     --panel: #f7f8fa;
   }
   @media (prefers-color-scheme: dark) {
@@ -24,6 +25,7 @@
       --accent: #60a5fa;
       --danger: #f87171;
       --success: #4ade80;
+      --warning: #fbbf24;
       --panel: #1b1f26;
     }
   }
@@ -99,7 +101,24 @@
     font-size: 0.88rem;
   }
   .doc-list li:hover { background: var(--border); }
-  .doc-list .meta { color: var(--muted); white-space: nowrap; }
+  .doc-list .meta { color: var(--muted); white-space: nowrap; display: flex; align-items: center; gap: 0.5rem; }
+  .doc-list .name { min-width: 0; overflow-wrap: anywhere; }
+  .doc-list .detail { display: block; color: var(--danger); font-size: 0.8rem; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 0.35rem;
+    padding: 0.05rem 0.5rem; border-radius: 999px; font-size: 0.78rem;
+    border: 1px solid currentColor; white-space: nowrap;
+  }
+  .badge.running { color: var(--accent); }
+  .badge.done { color: var(--success); }
+  .badge.failed { color: var(--danger); }
+  .badge.cancelled, .badge.queued { color: var(--muted); }
+  .badge.interrupted { color: var(--warning); }
+  .badge .spinner { width: 10px; height: 10px; border-width: 2px; }
+  button.link {
+    background: none; color: var(--danger); padding: 0; font-size: 0.8rem;
+    text-decoration: underline;
+  }
   .empty { color: var(--muted); font-size: 0.88rem; }
 </style>
 </head>
@@ -156,28 +175,133 @@ function el(tag, attrs = {}, children = []) {
   return node;
 }
 
+// Uploads get a "<32 hex>_" prefix on disk to keep them unique; hide it.
+function displayName(name) {
+  return (name || "").replace(/^[0-9a-f]{32}_/, "");
+}
+
+function badge(status, text) {
+  const node = el("span", { class: `badge ${status}` });
+  if (status === "running" || status === "queued") node.appendChild(el("span", { class: "spinner" }));
+  node.appendChild(document.createTextNode(text || status));
+  return node;
+}
+
+function formatTime(value) {
+  return new Date(value).toLocaleString();
+}
+
+// Jobs submitted from this tab, so their result can be shown when they finish.
+const myJobs = new Set();
+let lastListSignature = "";
+let refreshTimer = null;
+
+async function cancelJob(job) {
+  if (!confirm(`Stop ingesting ${displayName(job.filename)}? What it has added so far will be removed.`)) return;
+  await fetch(`${API}/jobs/${job.id}/cancel`, { method: "POST" });
+  loadRecentDocuments();
+}
+
+function jobRow(job) {
+  let status = job.status;
+  let text = job.status;
+  if (job.status === "running" || job.status === "queued") {
+    if (job.cancel_requested) text = "cancelling…";
+    else if (job.progress) text = `${job.status} · ${job.progress}`;
+  }
+  const name = el("span", { class: "name", text: displayName(job.filename) });
+  if (job.status === "failed" && job.error) {
+    name.appendChild(el("span", { class: "detail", text: job.error }));
+  }
+  const meta = el("span", { class: "meta" }, [
+    badge(status, text),
+    el("span", { text: `${job.doc_type} · ${formatTime(job.created_at * 1000)}` }),
+  ]);
+  if ((job.status === "running" || job.status === "queued") && !job.cancel_requested) {
+    const btn = el("button", { class: "link", type: "button", text: "Cancel" });
+    btn.addEventListener("click", (evt) => {
+      evt.stopPropagation();
+      cancelJob(job);
+    });
+    meta.appendChild(btn);
+  }
+  const item = el("li", {}, [name, meta]);
+  if (job.doc_id) item.addEventListener("click", () => showGraph(job.doc_id));
+  return item;
+}
+
+function docRow(doc) {
+  const status = doc.status === "incomplete" ? "interrupted" : "done";
+  const item = el("li", {}, [
+    el("span", { class: "name", text: displayName(doc.filename) || doc.id }),
+    el("span", { class: "meta" }, [
+      badge(status),
+      el("span", { text: `${doc.doc_type} · ${formatTime(doc.ingested_at)}` }),
+    ]),
+  ]);
+  if (status === "interrupted") item.title = "Ingestion stopped before finishing (for example the server restarted). Upload the file again to redo it.";
+  item.addEventListener("click", () => showGraph(doc.id));
+  return item;
+}
+
+async function handleFinishedJobs(jobs) {
+  for (const job of jobs) {
+    if (!myJobs.has(job.id) || job.status === "queued" || job.status === "running") continue;
+    myJobs.delete(job.id);
+    const name = displayName(job.filename);
+    if (job.status === "succeeded") {
+      setStatusText(
+        "success",
+        job.result.duplicate
+          ? `Already ingested: ${name} was uploaded before, so it's showing the existing document instead of adding a copy.`
+          : `Done: ${name}.`
+      );
+      await showGraph(job.result.document.id, job.result);
+    } else if (job.status === "failed") {
+      setStatusText("error", `Failed: ${name}: ${job.error || "unknown error"}`);
+    } else if (job.status === "cancelled") {
+      setStatusText("", `Cancelled: ${name}.`);
+    }
+  }
+}
+
 async function loadRecentDocuments() {
+  clearTimeout(refreshTimer);
   const list = document.getElementById("doc-list");
+  let jobs = [];
+  let docs = [];
   try {
-    const res = await fetch(`${API}/documents`);
-    const docs = await res.json();
-    list.innerHTML = "";
-    if (docs.length === 0) {
-      list.appendChild(el("li", { class: "empty", text: "No documents ingested yet." }));
-      return;
-    }
-    for (const doc of docs) {
-      const item = el("li", {}, [
-        el("span", { text: doc.filename || doc.id }),
-        el("span", { class: "meta", text: `${doc.doc_type} · ${new Date(doc.ingested_at).toLocaleString()}` }),
-      ]);
-      item.addEventListener("click", () => showGraph(doc.id));
-      list.appendChild(item);
-    }
+    const [jobsRes, docsRes] = await Promise.all([fetch(`${API}/jobs`), fetch(`${API}/documents`)]);
+    jobs = jobsRes.ok ? await jobsRes.json() : [];
+    docs = await docsRes.json();
   } catch (e) {
     list.innerHTML = "";
     list.appendChild(el("li", { class: "error", text: "Failed to load documents." }));
+    refreshTimer = setTimeout(loadRecentDocuments, 5000);
+    return;
   }
+
+  // Finished jobs show up as documents; the rest get their own row, and
+  // their (incomplete) document row is hidden so the file isn't listed twice.
+  const shownJobs = jobs.filter((j) => j.status !== "succeeded");
+  const jobDocIds = new Set(shownJobs.map((j) => j.doc_id).filter(Boolean));
+  const shownDocs = docs.filter((d) => !jobDocIds.has(d.id));
+
+  const signature = JSON.stringify([shownJobs, shownDocs]);
+  if (signature !== lastListSignature) {
+    lastListSignature = signature;
+    list.innerHTML = "";
+    if (shownJobs.length === 0 && shownDocs.length === 0) {
+      list.appendChild(el("li", { class: "empty", text: "No documents ingested yet." }));
+    }
+    for (const job of shownJobs) list.appendChild(jobRow(job));
+    for (const doc of shownDocs) list.appendChild(docRow(doc));
+  }
+
+  await handleFinishedJobs(jobs);
+
+  const active = jobs.some((j) => j.status === "queued" || j.status === "running");
+  if (active || myJobs.size > 0) refreshTimer = setTimeout(loadRecentDocuments, 2000);
 }
 
 function renderSummary(result) {
@@ -261,37 +385,10 @@ function setStatus(html) {
   document.getElementById("status-line").innerHTML = html;
 }
 
-async function pollJob(jobId) {
-  const poll = async () => {
-    const res = await fetch(`${API}/jobs/${jobId}`);
-    if (!res.ok) {
-      setStatus(`<span class="error">Lost track of job ${jobId}.</span>`);
-      return;
-    }
-    const job = await res.json();
-
-    if (job.status === "queued" || job.status === "running") {
-      const progress = job.progress ? ` (${job.progress})` : "";
-      setStatus(`<span class="spinner"></span> <span>${job.status}${progress} — this can take a few minutes.</span>`);
-      setTimeout(poll, 2000);
-      return;
-    }
-
-    document.getElementById("submit-btn").disabled = false;
-
-    if (job.status === "succeeded") {
-      if (job.result.duplicate) {
-        setStatus(`<span class="success">Already ingested: this file was uploaded before, so it's showing the existing document instead of adding a copy.</span>`);
-      } else {
-        setStatus(`<span class="success">Done.</span>`);
-      }
-      await showGraph(job.result.document.id, job.result);
-      loadRecentDocuments();
-    } else if (job.status === "failed") {
-      setStatus(`<span class="error">Failed: ${job.error || "unknown error"}</span>`);
-    }
-  };
-  poll();
+function setStatusText(cls, text) {
+  const line = document.getElementById("status-line");
+  line.innerHTML = "";
+  line.appendChild(el("span", { class: cls, text }));
 }
 
 document.getElementById("ingest-form").addEventListener("submit", async (evt) => {
@@ -316,7 +413,11 @@ document.getElementById("ingest-form").addEventListener("submit", async (evt) =>
       return;
     }
     const { job_id } = await res.json();
-    pollJob(job_id);
+    myJobs.add(job_id);
+    setStatusText("", `Started ingesting ${fileInput.files[0].name}. Its progress shows in Recent documents below.`);
+    fileInput.value = "";
+    document.getElementById("submit-btn").disabled = false;
+    loadRecentDocuments();
   } catch (e) {
     setStatus(`<span class="error">Network error while uploading.</span>`);
     document.getElementById("submit-btn").disabled = false;

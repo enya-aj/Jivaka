@@ -238,3 +238,30 @@ def test_document_from_before_completion_flag_counts_as_existing(graph):
     assert second.relation_count == first.relation_count
     assert second.definitions_matched == first.definitions_matched
     assert _document_count(graph) == 1
+
+
+def test_cancelled_ingest_removes_what_it_wrote(graph):
+    from jivaka.ingestion.pipeline import IngestionCancelled
+
+    path = FIXTURES_DIR / "sample_textbook_excerpt.txt"
+    seen_doc_ids = []
+
+    def on_progress(done: int, total: int) -> None:
+        if done >= 1:
+            raise IngestionCancelled()
+
+    with pytest.raises(IngestionCancelled):
+        ingest_document(
+            path=path,
+            doc_type="textbook",
+            graph=graph,
+            extractor=FakeEntityExtractor(),
+            definition_source=StubDictionarySource(),
+            on_document=seen_doc_ids.append,
+            on_progress=on_progress,
+        )
+
+    assert len(seen_doc_ids) == 1
+    for label in ("Document", "Chunk", "Entity"):
+        count = graph.query(f"MATCH (n:{label}) RETURN count(n)").result_set[0][0]
+        assert count == 0, label
