@@ -120,6 +120,26 @@
     text-decoration: underline;
   }
   .empty { color: var(--muted); font-size: 0.88rem; }
+  .panel-header { display: flex; justify-content: space-between; align-items: center; }
+  .panel-header h2 { margin: 0; }
+  .view-toggle { display: flex; gap: 0.4rem; }
+  .view-toggle button { padding: 0.3rem 0.7rem; font-size: 0.82rem; }
+  .view-toggle button:not(.active) { background: transparent; border: 1px solid var(--border); color: var(--fg); }
+  #graph-diagram { margin-top: 1rem; }
+  .graph-legend { display: flex; flex-wrap: wrap; gap: 0.9rem; margin-top: 0.6rem; font-size: 0.78rem; color: var(--muted); }
+  .legend-item { display: flex; align-items: center; gap: 0.35rem; }
+  .legend-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+  .graph-detail {
+    margin-top: 0.6rem;
+    padding: 0.6rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 0.85rem;
+    white-space: pre-wrap;
+    max-height: 120px;
+    overflow-y: auto;
+  }
+  .graph-detail.empty { color: var(--muted); }
 </style>
 </head>
 <body>
@@ -145,9 +165,16 @@
   </div>
 
   <div class="panel" id="result-panel" style="display:none;">
-    <h2>Result</h2>
+    <div class="panel-header">
+      <h2>Result</h2>
+      <div class="view-toggle">
+        <button type="button" id="view-tree-btn" class="active">Tree</button>
+        <button type="button" id="view-graph-btn">Graph</button>
+      </div>
+    </div>
     <table id="summary-table"></table>
     <div id="graph-tree" class="tree"></div>
+    <div id="graph-diagram" style="display:none;"></div>
   </div>
 
   <div class="panel">
@@ -395,14 +422,403 @@ function renderTree(dump) {
   }
 }
 
+// ---- Graph diagram (custom, dependency-free SVG force layout) ----
+
+const GRAPH_NODE_COLORS = { document: "#3b82f6", chunk: "#94a3b8", definition: "#06b6d4" };
+const ENTITY_TYPE_COLORS = { symptom: "#f59e0b", diagnosis: "#ef4444", treatment: "#10b981", other: "#8b5cf6" };
+const GRAPH_NODE_RADIUS = { document: 14, chunk: 10, entity: 7, definition: 6 };
+
+function nodeColor(node) {
+  if (node.kind === "entity") return ENTITY_TYPE_COLORS[node.entityType] || ENTITY_TYPE_COLORS.other;
+  return GRAPH_NODE_COLORS[node.kind] || "#888";
+}
+
+function buildGraphData(dump) {
+  const nodes = [];
+  const edges = [];
+  const seenNodeIds = new Set();
+  const definitionKeyToId = new Map();
+
+  function addNode(node) {
+    if (seenNodeIds.has(node.id)) return;
+    seenNodeIds.add(node.id);
+    nodes.push(node);
+  }
+
+  const docNodeId = `doc:${dump.document.id}`;
+  addNode({
+    id: docNodeId,
+    kind: "document",
+    label: truncate(displayName(dump.document.filename), 22),
+    detail: `Document: ${displayName(dump.document.filename)}\nType: ${dump.document.doc_type}` +
+      (dump.document.summary ? `\n\n${dump.document.summary}` : ""),
+  });
+
+  for (const entry of dump.chunks) {
+    const chunk = entry.chunk;
+    const chunkNodeId = `chunk:${chunk.id}`;
+    addNode({
+      id: chunkNodeId,
+      kind: "chunk",
+      label: `Chunk #${chunk.order}`,
+      detail: chunk.text,
+    });
+    edges.push({ source: docNodeId, target: chunkNodeId, kind: "structural" });
+
+    for (const e of entry.entities) {
+      const entity = e.entity;
+      const entityNodeId = `entity:${entity.id}`;
+      addNode({
+        id: entityNodeId,
+        kind: "entity",
+        entityType: entity.entity_type,
+        label: truncate(entity.name, 18),
+        detail: `[${entity.entity_type}] ${entity.name}`,
+      });
+      edges.push({ source: chunkNodeId, target: entityNodeId, kind: "structural" });
+
+      const def = e.definition;
+      if (def) {
+        // Same dedup key graph_writer.py's write_definition MERGEs on -
+        // definitions are shared across documents, so two entities here
+        // pointing at the same term must render as one node, not two.
+        const key = `${def.normalized_term || def.term}::${def.source}`;
+        let defNodeId = definitionKeyToId.get(key);
+        if (!defNodeId) {
+          defNodeId = `def:${key}`;
+          definitionKeyToId.set(key, defNodeId);
+          addNode({
+            id: defNodeId,
+            kind: "definition",
+            label: truncate(def.term, 18),
+            detail: def.definition_text,
+          });
+        }
+        edges.push({ source: entityNodeId, target: defNodeId, kind: "structural" });
+      }
+    }
+  }
+
+  for (const rel of dump.relations || []) {
+    edges.push({
+      source: `entity:${rel.source_entity_id}`,
+      target: `entity:${rel.target_entity_id}`,
+      kind: "related",
+      label: rel.relation_type,
+    });
+  }
+
+  return { nodes, edges };
+}
+
+function computeForceLayout(nodes, edges, width, height) {
+  const n = nodes.length;
+  if (n === 0) return;
+  const k = Math.sqrt((width * height) / n) * 0.9;
+  const indexById = new Map();
+
+  nodes.forEach((node, i) => {
+    indexById.set(node.id, i);
+    const angle = (2 * Math.PI * i) / n;
+    const radius = Math.min(width, height) / 3;
+    node.x = width / 2 + Math.cos(angle) * radius;
+    node.y = height / 2 + Math.sin(angle) * radius;
+  });
+
+  let temperature = Math.max(width, height) / 10;
+  const iterations = 220;
+
+  for (let iter = 0; iter < iterations; iter++) {
+    const dx = new Float64Array(n);
+    const dy = new Float64Array(n);
+
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const rdx = nodes[i].x - nodes[j].x;
+        const rdy = nodes[i].y - nodes[j].y;
+        const dist = Math.sqrt(rdx * rdx + rdy * rdy) || 0.01;
+        const force = (k * k) / dist;
+        const fx = (rdx / dist) * force;
+        const fy = (rdy / dist) * force;
+        dx[i] += fx; dy[i] += fy;
+        dx[j] -= fx; dy[j] -= fy;
+      }
+    }
+
+    for (const edge of edges) {
+      const i = indexById.get(edge.source);
+      const j = indexById.get(edge.target);
+      if (i === undefined || j === undefined) continue;
+      const rdx = nodes[i].x - nodes[j].x;
+      const rdy = nodes[i].y - nodes[j].y;
+      const dist = Math.sqrt(rdx * rdx + rdy * rdy) || 0.01;
+      const force = (dist * dist) / k;
+      const fx = (rdx / dist) * force;
+      const fy = (rdy / dist) * force;
+      dx[i] -= fx; dy[i] -= fy;
+      dx[j] += fx; dy[j] += fy;
+    }
+
+    for (let i = 0; i < n; i++) {
+      dx[i] += (width / 2 - nodes[i].x) * 0.01;
+      dy[i] += (height / 2 - nodes[i].y) * 0.01;
+    }
+
+    for (let i = 0; i < n; i++) {
+      const dist = Math.sqrt(dx[i] * dx[i] + dy[i] * dy[i]) || 0.01;
+      const limited = Math.min(dist, temperature);
+      nodes[i].x += (dx[i] / dist) * limited;
+      nodes[i].y += (dy[i] / dist) * limited;
+      nodes[i].x = Math.max(30, Math.min(width - 30, nodes[i].x));
+      nodes[i].y = Math.max(30, Math.min(height - 30, nodes[i].y));
+    }
+
+    temperature *= 0.97;
+  }
+}
+
+function showNodeDetail(node) {
+  const panel = document.getElementById("graph-detail");
+  if (!panel) return;
+  panel.classList.remove("empty");
+  panel.textContent = node.detail || node.label;
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function renderGraphDiagram(nodes, edges) {
+  const container = document.getElementById("graph-diagram");
+  container.innerHTML = ""; // drops the old <svg> and every listener on it
+
+  const width = container.clientWidth || 900;
+  const height = 560;
+  computeForceLayout(nodes, edges, width, height);
+
+  const view = { scale: 1, tx: 0, ty: 0 };
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("width", "100%");
+  svg.setAttribute("height", String(height));
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.style.background = "var(--bg)";
+  svg.style.border = "1px solid var(--border)";
+  svg.style.borderRadius = "6px";
+  svg.style.cursor = "grab";
+  svg.style.touchAction = "none";
+
+  const g = document.createElementNS(SVG_NS, "g");
+  const edgeGroup = document.createElementNS(SVG_NS, "g");
+  const nodeGroup = document.createElementNS(SVG_NS, "g");
+  g.appendChild(edgeGroup);
+  g.appendChild(nodeGroup);
+  svg.appendChild(g);
+
+  function applyTransform() {
+    g.setAttribute("transform", `translate(${view.tx}, ${view.ty}) scale(${view.scale})`);
+  }
+
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  const nodeElementsById = new Map(); // id -> { circle, label }
+  const edgesByNodeId = new Map(); // id -> [{line, label, source, target}]
+  nodes.forEach((node) => edgesByNodeId.set(node.id, []));
+
+  for (const edge of edges) {
+    const source = nodeById.get(edge.source);
+    const target = nodeById.get(edge.target);
+    if (!source || !target) continue;
+
+    const line = document.createElementNS(SVG_NS, "line");
+    line.setAttribute("x1", source.x);
+    line.setAttribute("y1", source.y);
+    line.setAttribute("x2", target.x);
+    line.setAttribute("y2", target.y);
+    line.setAttribute("stroke", edge.kind === "related" ? "var(--accent)" : "var(--border)");
+    line.setAttribute("stroke-width", edge.kind === "related" ? "1.5" : "1");
+    edgeGroup.appendChild(line);
+
+    let label = null;
+    if (edge.kind === "related" && edge.label) {
+      label = document.createElementNS(SVG_NS, "text");
+      label.setAttribute("x", (source.x + target.x) / 2);
+      label.setAttribute("y", (source.y + target.y) / 2);
+      label.setAttribute("font-size", "9");
+      label.setAttribute("fill", "var(--accent)");
+      label.textContent = edge.label;
+      edgeGroup.appendChild(label);
+    }
+
+    const rec = { line, label, source, target };
+    edgesByNodeId.get(source.id).push(rec);
+    edgesByNodeId.get(target.id).push(rec);
+  }
+
+  for (const node of nodes) {
+    const radius = GRAPH_NODE_RADIUS[node.kind] || 7;
+    const circle = document.createElementNS(SVG_NS, "circle");
+    circle.setAttribute("cx", node.x);
+    circle.setAttribute("cy", node.y);
+    circle.setAttribute("r", radius);
+    circle.setAttribute("fill", nodeColor(node));
+    circle.setAttribute("data-node-id", node.id);
+    circle.style.cursor = "pointer";
+    nodeGroup.appendChild(circle);
+
+    const label = document.createElementNS(SVG_NS, "text");
+    label.setAttribute("x", node.x);
+    label.setAttribute("y", node.y + radius + 11);
+    label.setAttribute("font-size", "9");
+    label.setAttribute("text-anchor", "middle");
+    label.setAttribute("fill", "var(--fg)");
+    label.textContent = node.label;
+    nodeGroup.appendChild(label);
+
+    nodeElementsById.set(node.id, { circle, label });
+    circle.addEventListener("click", () => showNodeDetail(node));
+  }
+
+  function updateNodePosition(node) {
+    const elements = nodeElementsById.get(node.id);
+    const radius = GRAPH_NODE_RADIUS[node.kind] || 7;
+    elements.circle.setAttribute("cx", node.x);
+    elements.circle.setAttribute("cy", node.y);
+    elements.label.setAttribute("x", node.x);
+    elements.label.setAttribute("y", node.y + radius + 11);
+    for (const rec of edgesByNodeId.get(node.id)) {
+      if (rec.source === node) { rec.line.setAttribute("x1", node.x); rec.line.setAttribute("y1", node.y); }
+      if (rec.target === node) { rec.line.setAttribute("x2", node.x); rec.line.setAttribute("y2", node.y); }
+      if (rec.label) {
+        rec.label.setAttribute("x", (rec.source.x + rec.target.x) / 2);
+        rec.label.setAttribute("y", (rec.source.y + rec.target.y) / 2);
+      }
+    }
+  }
+
+  function pointInGraphSpace(evt) {
+    const rect = svg.getBoundingClientRect();
+    const x = ((evt.clientX - rect.left) * (width / rect.width) - view.tx) / view.scale;
+    const y = ((evt.clientY - rect.top) * (height / rect.height) - view.ty) / view.scale;
+    return { x, y };
+  }
+
+  // Single set of pointer handlers on the svg itself (not per-node, not on
+  // window) - scoped to this render so it's garbage-collected along with
+  // the old <svg> the next time this function replaces container.innerHTML.
+  let draggedNode = null;
+  let panning = false;
+  let panStart = null;
+
+  svg.addEventListener("mousedown", (evt) => {
+    const nodeId = evt.target.getAttribute && evt.target.getAttribute("data-node-id");
+    if (nodeId) {
+      draggedNode = nodeById.get(nodeId);
+    } else {
+      panning = true;
+      panStart = { x: evt.clientX, y: evt.clientY, tx: view.tx, ty: view.ty };
+      svg.style.cursor = "grabbing";
+    }
+  });
+
+  svg.addEventListener("mousemove", (evt) => {
+    if (draggedNode) {
+      const pt = pointInGraphSpace(evt);
+      draggedNode.x = pt.x;
+      draggedNode.y = pt.y;
+      updateNodePosition(draggedNode);
+    } else if (panning) {
+      view.tx = panStart.tx + (evt.clientX - panStart.x);
+      view.ty = panStart.ty + (evt.clientY - panStart.y);
+      applyTransform();
+    }
+  });
+
+  function endDragOrPan() {
+    draggedNode = null;
+    panning = false;
+    svg.style.cursor = "grab";
+  }
+  svg.addEventListener("mouseup", endDragOrPan);
+  svg.addEventListener("mouseleave", endDragOrPan);
+
+  svg.addEventListener(
+    "wheel",
+    (evt) => {
+      evt.preventDefault();
+      const factor = evt.deltaY < 0 ? 1.1 : 0.9;
+      view.scale = Math.max(0.2, Math.min(4, view.scale * factor));
+      applyTransform();
+    },
+    { passive: false }
+  );
+
+  container.appendChild(svg);
+
+  const legendItems = [
+    ["Document", GRAPH_NODE_COLORS.document],
+    ["Chunk", GRAPH_NODE_COLORS.chunk],
+    ["Symptom", ENTITY_TYPE_COLORS.symptom],
+    ["Diagnosis", ENTITY_TYPE_COLORS.diagnosis],
+    ["Treatment", ENTITY_TYPE_COLORS.treatment],
+    ["Other entity", ENTITY_TYPE_COLORS.other],
+    ["Definition", GRAPH_NODE_COLORS.definition],
+  ];
+  const legend = el(
+    "div",
+    { class: "graph-legend" },
+    legendItems.map(([label, color]) =>
+      el("span", { class: "legend-item" }, [
+        el("span", { class: "legend-dot", style: `background:${color}` }),
+        el("span", { text: label }),
+      ])
+    )
+  );
+  container.appendChild(legend);
+  container.appendChild(
+    el("div", { id: "graph-detail", class: "graph-detail empty", text: "Click a node for details. Drag nodes, scroll to zoom, drag the background to pan." })
+  );
+}
+
+let currentDump = null;
+let graphDiagramBuilt = false;
+// Stays on whichever view was picked last when another document is opened.
+let resultView = "tree";
+
+function setResultView(view) {
+  resultView = view;
+  const treeBtn = document.getElementById("view-tree-btn");
+  const graphBtn = document.getElementById("view-graph-btn");
+  const treeEl = document.getElementById("graph-tree");
+  const graphEl = document.getElementById("graph-diagram");
+  if (view === "graph") {
+    treeEl.style.display = "none";
+    graphEl.style.display = "block";
+    treeBtn.classList.remove("active");
+    graphBtn.classList.add("active");
+    if (!graphDiagramBuilt && currentDump) {
+      const { nodes, edges } = buildGraphData(currentDump);
+      renderGraphDiagram(nodes, edges);
+      graphDiagramBuilt = true;
+    }
+  } else {
+    graphEl.style.display = "none";
+    treeEl.style.display = "block";
+    graphBtn.classList.remove("active");
+    treeBtn.classList.add("active");
+  }
+}
+
+document.getElementById("view-tree-btn").addEventListener("click", () => setResultView("tree"));
+document.getElementById("view-graph-btn").addEventListener("click", () => setResultView("graph"));
+
 async function showGraph(docId, resultForSummary) {
   const res = await fetch(`${API}/documents/${docId}/graph`);
   if (!res.ok) return;
   const dump = await res.json();
+  currentDump = dump;
+  graphDiagramBuilt = false;
   document.getElementById("result-panel").style.display = "block";
   if (resultForSummary) renderSummary(resultForSummary);
   else document.getElementById("summary-table").innerHTML = "";
   renderTree(dump);
+  setResultView(resultView);
 }
 
 function setStatus(html) {
