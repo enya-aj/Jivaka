@@ -120,3 +120,16 @@ def test_documents_carry_a_status(monkeypatch):
     docs = TestClient(app).get("/documents").json()
 
     assert [d["status"] for d in docs] == ["done", "incomplete", "done"]
+
+
+def test_ingest_rejects_unsupported_file_type(monkeypatch, tmp_path):
+    monkeypatch.setattr(routes, "get_settings", lambda: type("S", (), {"upload_dir": str(tmp_path)})())
+    client = TestClient(app)
+
+    response = client.post(
+        "/ingest", files={"file": ("slides.pptx", b"x", "application/octet-stream")}, data={"doc_type": "textbook"}
+    )
+
+    assert response.status_code == 400
+    assert "Unsupported file type '.pptx'" in response.json()["detail"]
+    assert list(tmp_path.iterdir()) == []
