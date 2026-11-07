@@ -49,6 +49,10 @@ def ingest(
     table.add_row("definitions matched", str(result.definitions_matched))
     table.add_row("definitions missing", str(result.definitions_missing))
     table.add_row("OCR pages used", str(result.ocr_pages_used))
+    if result.reused_extractions:
+        table.add_row("repeated chunks (extraction reused)", str(result.reused_extractions))
+    if result.failed_chunks:
+        table.add_row("chunks whose extraction failed", str(result.failed_chunks))
     table.add_row("elapsed (s)", f"{result.elapsed_seconds:.2f}")
     console.print(table)
 

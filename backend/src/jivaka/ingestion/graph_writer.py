@@ -106,30 +106,7 @@ class GraphWriter:
         self.graph.query("MATCH (c:Chunk {id: $chunk_id}) SET c.extracted = true", params={"chunk_id": chunk_id})
 
     def write_chunk(self, chunk: Chunk) -> None:
-        self.graph.query(
-            """
-            MATCH (d:Document {id: $doc_id})
-            MERGE (c:Chunk {id: $id})
-            SET c.doc_id = $doc_id,
-                c.text = $text,
-                c.order = $order,
-                c.source_type = $source_type,
-                c.page_number = $page_number,
-                c.deidentified = $deidentified,
-                c.created_at = $created_at
-            MERGE (d)-[:HAS_CHUNK]->(c)
-            """,
-            params={
-                "id": chunk.id,
-                "doc_id": chunk.doc_id,
-                "text": chunk.text,
-                "order": chunk.order,
-                "source_type": chunk.source_type,
-                "page_number": chunk.page_number,
-                "deidentified": chunk.deidentified,
-                "created_at": chunk.created_at.isoformat(),
-            },
-        )
+        self.graph.query(_CHUNK_CYPHER, params=_chunk_params(chunk))
 
     def write_entity(self, chunk_id: str, entity) -> None:
         self.graph.query(
@@ -197,23 +174,142 @@ class GraphWriter:
         self, extraction: ChunkExtraction, definitions_by_entity_id: dict[str, Optional[Definition]]
     ) -> tuple[int, int, int, int]:
         """Writes all entities/relations/definitions for one chunk's
-        extraction. Returns (entity_count, relation_count, definitions_matched,
+        extraction, one batched (UNWIND) query per kind rather than one query
+        per item. Returns (entity_count, relation_count, definitions_matched,
         definitions_missing)."""
-        definitions_matched = 0
-        definitions_missing = 0
+        if extraction.entities:
+            self.graph.query(
+                "MATCH (c:Chunk {id: $chunk_id}) WITH c " + _ENTITIES_CYPHER,
+                params={"chunk_id": extraction.chunk_id, "entities": _entity_rows(extraction)},
+            )
+        return self._write_definitions_and_relations(extraction, definitions_by_entity_id)
 
+    def write_extracted_chunk(
+        self,
+        chunk: Chunk,
+        extraction: ChunkExtraction,
+        definitions_by_entity_id: dict[str, Optional[Definition]],
+    ) -> tuple[int, int, int, int]:
+        """Writes a chunk together with its extraction and marks it finished,
+        in at most four queries: chunk + entities, definitions, relations,
+        then the `extracted` flag. The flag goes last, so a chunk cut off
+        partway is redone by a resumed ingest. Returns the same counts as
+        write_chunk_extraction."""
+        params = _chunk_params(chunk)
+        params["entities"] = _entity_rows(extraction)
+        self.graph.query(_CHUNK_CYPHER + " WITH c " + _ENTITIES_CYPHER, params=params)
+        counts = self._write_definitions_and_relations(extraction, definitions_by_entity_id)
+        self.mark_chunk_extracted(chunk.id)
+        return counts
+
+    def _write_definitions_and_relations(
+        self, extraction: ChunkExtraction, definitions_by_entity_id: dict[str, Optional[Definition]]
+    ) -> tuple[int, int, int, int]:
+        definition_rows = []
         for entity in extraction.entities:
-            self.write_entity(extraction.chunk_id, entity)
             definition = definitions_by_entity_id.get(entity.id)
             if definition is not None:
-                self.write_definition(entity.id, definition)
-                definitions_matched += 1
-            else:
-                definitions_missing += 1
-
-        for relation in extraction.relations:
-            self.write_relation(
-                relation.source_entity_id, relation.target_entity_id, relation.relation_type
+                definition_rows.append(
+                    {
+                        "entity_id": entity.id,
+                        "normalized_term": normalize_term(definition.term),
+                        "source": definition.source,
+                        "term": definition.term,
+                        "definition_text": definition.definition_text,
+                        "source_id": definition.source_id,
+                        "semantic_type": definition.semantic_type,
+                    }
+                )
+        if definition_rows:
+            # Definitions are intentionally deduplicated/shared across
+            # documents: MERGE on normalized term + source, not on an id.
+            self.graph.query(
+                """
+                UNWIND $rows AS row
+                MATCH (e:Entity {id: row.entity_id})
+                MERGE (def:Definition {normalized_term: row.normalized_term, source: row.source})
+                SET def.term = row.term,
+                    def.definition_text = row.definition_text,
+                    def.source_id = row.source_id,
+                    def.semantic_type = row.semantic_type
+                MERGE (e)-[:DEFINED_AS]->(def)
+                """,
+                params={"rows": definition_rows},
             )
 
-        return len(extraction.entities), len(extraction.relations), definitions_matched, definitions_missing
+        if extraction.relations:
+            self.graph.query(
+                """
+                UNWIND $rows AS row
+                MATCH (a:Entity {id: row.source_id}), (b:Entity {id: row.target_id})
+                MERGE (a)-[:RELATED_TO {relation_type: row.relation_type}]->(b)
+                """,
+                params={
+                    "rows": [
+                        {
+                            "source_id": r.source_entity_id,
+                            "target_id": r.target_entity_id,
+                            "relation_type": r.relation_type,
+                        }
+                        for r in extraction.relations
+                    ]
+                },
+            )
+
+        matched = len(definition_rows)
+        return len(extraction.entities), len(extraction.relations), matched, len(extraction.entities) - matched
+
+
+_CHUNK_CYPHER = """
+MATCH (d:Document {id: $doc_id})
+MERGE (c:Chunk {id: $id})
+SET c.doc_id = $doc_id,
+    c.text = $text,
+    c.order = $order,
+    c.source_type = $source_type,
+    c.page_number = $page_number,
+    c.deidentified = $deidentified,
+    c.created_at = $created_at,
+    c.extracted = false
+MERGE (d)-[:HAS_CHUNK]->(c)
+"""
+
+_ENTITIES_CYPHER = """
+UNWIND $entities AS ent
+MERGE (e:Entity {id: ent.id})
+SET e.doc_id = ent.doc_id,
+    e.name = ent.name,
+    e.normalized_name = ent.normalized_name,
+    e.entity_type = ent.entity_type,
+    e.extraction_source = ent.extraction_source,
+    e.confidence = ent.confidence
+MERGE (c)-[:MENTIONS]->(e)
+"""
+
+
+def _chunk_params(chunk: Chunk) -> dict:
+    return {
+        "id": chunk.id,
+        "doc_id": chunk.doc_id,
+        "text": chunk.text,
+        "order": chunk.order,
+        "source_type": chunk.source_type,
+        "page_number": chunk.page_number,
+        "deidentified": chunk.deidentified,
+        "created_at": chunk.created_at.isoformat(),
+    }
+
+
+def _entity_rows(extraction: ChunkExtraction) -> list[dict]:
+    return [
+        {
+            "id": e.id,
+            "doc_id": e.doc_id,
+            "name": e.name,
+            "normalized_name": e.normalized_name,
+            "entity_type": e.entity_type,
+            "extraction_source": e.extraction_source,
+            "confidence": e.confidence,
+        }
+        for e in extraction.entities
+    ]

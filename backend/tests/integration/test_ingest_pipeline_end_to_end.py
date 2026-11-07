@@ -1,4 +1,5 @@
 import os
+import threading
 import uuid
 from pathlib import Path
 
@@ -122,9 +123,11 @@ def test_ingest_patient_note_end_to_end(graph):
 class CountingExtractor(FakeEntityExtractor):
     def __init__(self):
         self.calls = 0
+        self._lock = threading.Lock()  # extractions run in parallel threads
 
     def extract(self, chunk: Chunk) -> ChunkExtraction:
-        self.calls += 1
+        with self._lock:
+            self.calls += 1
         return super().extract(chunk)
 
 
@@ -318,7 +321,8 @@ def test_reupload_resumes_interrupted_ingest(graph, tmp_path):
 
     assert resumed.document.id == interrupted_id
     assert resumed.resumed_chunks == 3
-    assert extractor.calls == resumed.chunk_count - 3
+    # Chunks repeating an earlier chunk's text reuse its extraction.
+    assert extractor.calls + resumed.reused_extractions == resumed.chunk_count - 3
     assert _document_count(graph) == 2
     # Counts match a run that never stopped, and nothing is left doubled up.
     assert resumed.chunk_count > 3
@@ -341,18 +345,17 @@ def test_resume_redoes_the_chunk_that_was_cut_off(graph, tmp_path):
     baseline = _uninterrupted_run(graph, kwargs)
 
     class DiesMidChunk(FakeEntityExtractor):
-        calls = 0
-
+        # Picked by position, not by call count: extractions run in
+        # parallel, so which call comes third depends on thread timing.
         def extract(self, chunk):
-            self.calls += 1
-            if self.calls == 3:
+            if chunk.order == 2:
                 raise KeyboardInterrupt()
             return super().extract(chunk)
 
     with pytest.raises(KeyboardInterrupt):
         ingest_document(extractor=DiesMidChunk(), **kwargs)
-    # Chunk 3 was written but never extracted.
-    assert graph.query("MATCH (c:Chunk) RETURN count(c)").result_set[0][0] == 3
+    # Chunk 3 was cut off, so only the two finished chunks were written.
+    assert graph.query("MATCH (c:Chunk) RETURN count(c)").result_set[0][0] == 2
 
     resumed = ingest_document(extractor=FakeEntityExtractor(), **kwargs)
 
@@ -376,3 +379,87 @@ def test_resume_works_for_documents_from_before_the_chunk_flag(graph, tmp_path):
     # Without the flag, the last chunk written is assumed unfinished and redone.
     assert resumed.resumed_chunks == 2
     _assert_same_counts(resumed, baseline)
+
+
+def _write_distinct_textbook(tmp_path, paragraphs: int = 8) -> Path:
+    path = tmp_path / "distinct_textbook.txt"
+    path.write_text(
+        "\n\n".join(f"Topic {i}. Pneumonia with fever is treated with amoxicillin. " + f"Note {i}. " * 150
+                     for i in range(paragraphs))
+    )
+    return path
+
+
+def test_extractions_run_concurrently_and_are_written_in_order(graph, tmp_path, monkeypatch):
+    import threading
+    import time
+
+    from jivaka.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "ingest_max_concurrency", 3)
+    lock = threading.Lock()
+    state = {"running": 0, "peak": 0}
+
+    class SlowExtractor(FakeEntityExtractor):
+        def extract(self, chunk):
+            with lock:
+                state["running"] += 1
+                state["peak"] = max(state["peak"], state["running"])
+            time.sleep(0.05)
+            with lock:
+                state["running"] -= 1
+            return super().extract(chunk)
+
+    progress = []
+    path = _write_distinct_textbook(tmp_path)
+    result = ingest_document(
+        path=path, doc_type="textbook", graph=graph, extractor=SlowExtractor(),
+        definition_source=StubDictionarySource(), on_progress=lambda d, t: progress.append(d),
+    )
+
+    assert state["peak"] == 3
+    assert progress == list(range(result.chunk_count + 1))
+    rows = graph.query(
+        "MATCH (:Document {id: $id})-[:HAS_CHUNK]->(c:Chunk) RETURN c.order, c.extracted ORDER BY c.order",
+        params={"id": result.document.id},
+    ).result_set
+    assert rows == [[i, True] for i in range(result.chunk_count)]
+    assert result.entity_count == 3 * result.chunk_count
+    assert result.relation_count == result.chunk_count
+
+
+def test_repeated_chunk_text_reuses_the_extraction(graph, tmp_path):
+    path = tmp_path / "repeated.txt"
+    block = "Pneumonia with fever is treated with amoxicillin. " * 25
+    path.write_text("\n\n".join([block] * 4))
+    extractor = CountingExtractor()
+
+    result = ingest_document(path=path, doc_type="textbook", graph=graph, extractor=extractor,
+                             definition_source=StubDictionarySource())
+
+    assert result.chunk_count == 4
+    assert extractor.calls == 1
+    assert result.reused_extractions == 3
+    # Each chunk still gets its own entities and relation.
+    assert result.entity_count == 12
+    assert result.relation_count == 4
+    per_chunk = graph.query(
+        "MATCH (c:Chunk {doc_id: $id})-[:MENTIONS]->(e:Entity) RETURN c.id, count(e)",
+        params={"id": result.document.id},
+    ).result_set
+    assert sorted(n for _, n in per_chunk) == [3, 3, 3, 3]
+
+
+def test_failed_chunk_extractions_are_counted(graph, tmp_path):
+    class SometimesFails(FakeEntityExtractor):
+        def extract(self, chunk):
+            if chunk.order == 1:
+                return ChunkExtraction(chunk_id=chunk.id, failed=True)
+            return super().extract(chunk)
+
+    result = ingest_document(path=_write_distinct_textbook(tmp_path, 4), doc_type="textbook", graph=graph,
+                             extractor=SometimesFails(), definition_source=StubDictionarySource())
+
+    assert result.failed_chunks == 1
+    assert result.chunk_count == 4
+    assert result.entity_count == 9

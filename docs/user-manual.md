@@ -25,10 +25,23 @@ Edit `.env`:
 | `FALKOR_GRAPH_NAME` | Name of the single shared graph all documents write into | `jivaka` |
 | `OLLAMA_HOST` | Ollama base URL, as seen by the backend container | `http://ollama:11434` |
 | `OLLAMA_MODEL` | **Required.** Model used for entity/relation extraction | *(none — must be set)* |
-| `OLLAMA_REQUEST_TIMEOUT_SECONDS` | How long to wait for one chunk's extraction call before giving up (raise this if Ollama is shared/contended) | `300` |
+| `OLLAMA_REQUEST_TIMEOUT_SECONDS` | How long to wait for Ollama to send more of a chunk's extraction before giving up. Replies are streamed, so a long extraction that keeps producing output is not cut off | `300` |
+| `INGEST_MAX_CONCURRENCY` | Most chunk extractions sent to Ollama at once, across all running ingests (see [Large documents](#large-documents)) | `2` |
+| `INGEST_EXTRACTION_RETRIES` | Extra attempts for a chunk whose extraction failed before it is stored with no entities | `1` |
+| `TEXTBOOK_CHUNK_MAX_CHARS` / `PATIENT_RECORD_CHUNK_MAX_CHARS` | Chunk size in characters. Bigger chunks mean fewer LLM calls | `1500` / `1200` |
 | `DEFINITION_SOURCE` | `stub` (curated offline dataset) or `umls` (not yet implemented) | `stub` |
 | `UPLOAD_DIR` | Where uploaded files are written inside the backend container | `/app/data/uploads` |
 | `OCR_TEXT_DENSITY_THRESHOLD` | Chars-per-pixel² below which a page is treated as scanned and routed to OCR | `0.005` (placeholder, untuned) |
+
+### Large documents
+
+Chunking never calls the LLM: text is split by paragraphs (and, for patient records, by section headers) up to the chunk size. The time goes into one Ollama extraction per chunk, so a large document's ingest time is roughly its chunk count times one extraction.
+
+- Up to `INGEST_MAX_CONCURRENCY` extractions run at once, shared by all running ingests. While they run, finished chunks are written to the graph in order, a few batched queries per chunk, and each chunk is marked finished as it is written, so a re-upload after a restart carries on from there.
+- They only run side by side if Ollama is allowed to serve several requests at once (`OLLAMA_NUM_PARALLEL` set on the Ollama server, which costs extra memory per slot). With Ollama serving one at a time, the second request waits in Ollama's queue; that still removes the pause between chunks, but doesn't double throughput. Set `INGEST_MAX_CONCURRENCY` to match `OLLAMA_NUM_PARALLEL`.
+- Chunks whose text repeats an earlier chunk of the same file (boilerplate, repeated XML fields) reuse that chunk's extraction instead of calling Ollama again. The ingest result reports these as `reused_extractions`.
+- A chunk whose extraction still fails after `INGEST_EXTRACTION_RETRIES` is stored with no entities and counted in `failed_chunks`, rather than stopping the whole ingest.
+- Raising the chunk sizes cuts the number of LLM calls, at the cost of longer prompts per call. Changing them only affects new ingests.
 
 ### Reusing an existing Ollama instead of the bundled one
 

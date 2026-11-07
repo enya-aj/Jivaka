@@ -32,6 +32,21 @@ class Settings(BaseSettings):
     # DEID_EXTRA_ID_PATTERNS='["\\b\\d{2}-\\d{6}\\b"]'. Every match becomes [ID].
     deid_extra_id_patterns: list[str] = []
 
+    # Ingestion speed (see "Large documents" in docs/user-manual.md).
+    # Most LLM extractions running at once, across all ingests in this
+    # backend. 2 suits a single Ollama host: with OLLAMA_NUM_PARALLEL >= 2
+    # both run in parallel, and with 1 the second waits in Ollama's queue so
+    # the model never idles while results are written to the graph.
+    ingest_max_concurrency: int = 2
+    # Chunk sizes in characters. Bigger chunks mean fewer LLM calls per
+    # document. Changing them means an interrupted ingest of a file can't
+    # reuse its finished chunks and starts that file over.
+    textbook_chunk_max_chars: int = 1500
+    patient_record_chunk_max_chars: int = 1200
+    # Extra attempts for a chunk whose extraction failed (timeout, Ollama
+    # error, invalid JSON) before it is recorded with no entities.
+    ingest_extraction_retries: int = 1
+
     # Chat: how many chunks are given to the model as sources per answer.
     retrieval_top_k: int = 6
 
