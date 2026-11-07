@@ -366,6 +366,8 @@ function renderSummary(result) {
     ["definitions missing", result.definitions_missing],
     ["OCR pages used", result.ocr_pages_used],
     ...(result.resumed_chunks ? [["chunks reused from earlier run", result.resumed_chunks]] : []),
+    ...(result.reused_extractions ? [["repeated chunks (extraction reused)", result.reused_extractions]] : []),
+    ...(result.failed_chunks ? [["chunks whose extraction failed", result.failed_chunks]] : []),
     ["elapsed (s)", result.elapsed_seconds.toFixed(2)],
   ];
   for (const [label, value] of rows) {

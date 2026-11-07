@@ -72,6 +72,9 @@ class ChunkExtraction(BaseModel):
     chunk_id: str
     entities: list[Entity] = Field(default_factory=list)
     relations: list[EntityRelation] = Field(default_factory=list)
+    # True when the LLM call failed even after retrying, so the chunk is
+    # recorded with no entities.
+    failed: bool = False
 
 
 class IngestionResult(BaseModel):
@@ -89,3 +92,8 @@ class IngestionResult(BaseModel):
     # Chunks reused from an interrupted earlier run of the same file instead
     # of being extracted again.
     resumed_chunks: int = 0
+    # Chunks whose extraction failed after retrying (stored with no entities).
+    failed_chunks: int = 0
+    # Chunks whose text repeated an earlier chunk in the same run, so its
+    # extraction was reused instead of calling the LLM again.
+    reused_extractions: int = 0

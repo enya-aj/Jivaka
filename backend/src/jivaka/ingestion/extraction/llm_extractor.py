@@ -1,6 +1,8 @@
 import logging
+import time
 from typing import Optional, get_args
 
+from jivaka.config import get_settings
 from jivaka.ingestion.extraction.base import EntityExtractor
 from jivaka.ingestion.extraction.llm_client import OllamaClient
 from jivaka.ingestion.models import Chunk, ChunkExtraction, Entity, EntityRelation, EntityType
@@ -30,16 +32,28 @@ Text:
 
 
 class LLMEntityExtractor(EntityExtractor):
-    def __init__(self, client: Optional[OllamaClient] = None):
+    """Safe to call from several threads at once (the pipeline runs
+    extractions concurrently); the underlying httpx client is thread-safe."""
+
+    def __init__(self, client: Optional[OllamaClient] = None, retries: Optional[int] = None):
         self.client = client or OllamaClient()
+        self.retries = get_settings().ingest_extraction_retries if retries is None else retries
 
     def extract(self, chunk: Chunk) -> ChunkExtraction:
         prompt = _PROMPT_TEMPLATE.format(text=chunk.text)
-        try:
-            raw = self.client.generate_json(prompt)
-        except Exception:
-            logger.exception("LLM extraction failed for chunk %s", chunk.id)
-            return ChunkExtraction(chunk_id=chunk.id)
+        raw = None
+        for attempt in range(self.retries + 1):
+            try:
+                raw = self.client.generate_json(prompt)
+                break
+            except Exception:
+                if attempt < self.retries:
+                    logger.warning("LLM extraction failed for chunk %s, retrying", chunk.id, exc_info=True)
+                    time.sleep(2**attempt)
+                else:
+                    logger.exception("LLM extraction failed for chunk %s", chunk.id)
+        if not isinstance(raw, dict):
+            return ChunkExtraction(chunk_id=chunk.id, failed=True)
 
         entities, by_normalized_name = self._parse_entities(chunk, raw.get("entities", []))
         relations = self._parse_relations(raw.get("relations", []), by_normalized_name)

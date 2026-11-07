@@ -1,6 +1,9 @@
 import threading
+import uuid
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
@@ -18,7 +21,16 @@ from jivaka.ingestion.graph_writer import GraphWriter
 from jivaka.ingestion.intake import LoadedDocument, load_document
 from jivaka.ingestion.linking.base import DefinitionSource
 from jivaka.ingestion.linking.selector import get_definition_source
-from jivaka.ingestion.models import Document, DocType, IngestionResult
+from jivaka.ingestion.models import (
+    Chunk,
+    ChunkExtraction,
+    Definition,
+    Document,
+    DocType,
+    Entity,
+    EntityRelation,
+    IngestionResult,
+)
 from jivaka.ingestion.ocr.detector import needs_ocr
 from jivaka.ingestion.ocr.easyocr_backend import ocr_image
 
@@ -27,6 +39,20 @@ from jivaka.ingestion.ocr.easyocr_backend import ocr_image
 # concurrent uploads of the same file can't both pass the duplicate check (or
 # one delete the other's in-progress document as a leftover).
 _hash_locks: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)
+
+
+# Caps LLM extractions running at once across every ingest in this process
+# (FastAPI runs each upload's ingest in its own thread), so several uploads
+# share the Ollama host instead of each adding INGEST_MAX_CONCURRENCY calls.
+_llm_slots: dict[int, threading.BoundedSemaphore] = {}
+_llm_slots_lock = threading.Lock()
+
+
+def _llm_semaphore(size: int) -> threading.BoundedSemaphore:
+    with _llm_slots_lock:
+        if size not in _llm_slots:
+            _llm_slots[size] = threading.BoundedSemaphore(size)
+        return _llm_slots[size]
 
 
 class IngestionCancelled(Exception):
@@ -232,7 +258,7 @@ def _ingest_loaded(
         if is_patient_record:
             writer.assign_pseudonym(document.id)
 
-        chunker = get_chunker(doc_type)
+        chunker = get_chunker(doc_type, _chunk_size(settings, doc_type))
         chunks = chunker.chunk(document.id, full_text)
         for chunk in chunks:
             chunk.deidentified = is_patient_record
@@ -262,35 +288,37 @@ def _ingest_loaded(
                     finished.pop(old["order"], None)
                     writer.delete_chunk(old["id"])
 
-        for i, chunk in enumerate(chunks, start=1):
+        todo: list[Chunk] = []
+        for chunk in chunks:
             done = finished.get(chunk.order)
-            if done is not None:
-                e_count, r_count, d_matched = stats.get(done["id"], (0, 0, 0))
-                entity_count += e_count
-                relation_count += r_count
-                definitions_matched += d_matched
-                definitions_missing += e_count - d_matched
-                resumed_chunks += 1
-                if on_progress:
-                    on_progress(i, len(chunks))
+            if done is None:
+                todo.append(chunk)
                 continue
-
-            writer.write_chunk(chunk)
-            extraction = extractor.extract(chunk)
-            definitions_by_entity_id = {
-                entity.id: definition_source.lookup(entity.normalized_name, entity.entity_type)
-                for entity in extraction.entities
-            }
-            e_count, r_count, d_matched, d_missing = writer.write_chunk_extraction(
-                extraction, definitions_by_entity_id
-            )
+            e_count, r_count, d_matched = stats.get(done["id"], (0, 0, 0))
             entity_count += e_count
             relation_count += r_count
             definitions_matched += d_matched
-            definitions_missing += d_missing
-            writer.mark_chunk_extracted(chunk.id)
-            if on_progress:
-                on_progress(i, len(chunks))
+            definitions_missing += e_count - d_matched
+            resumed_chunks += 1
+        if on_progress and resumed_chunks:
+            on_progress(resumed_chunks, len(chunks))
+
+        failed_chunks = 0
+        reused_extractions = 0
+        progress = resumed_chunks
+        extracted = _extract_concurrently(todo, extractor, definition_source, settings.ingest_max_concurrency)
+        with closing(extracted):  # stops the workers right away if this loop raises
+            for chunk, extraction, definitions, reused in extracted:
+                e_count, r_count, d_matched, d_missing = writer.write_extracted_chunk(chunk, extraction, definitions)
+                entity_count += e_count
+                relation_count += r_count
+                definitions_matched += d_matched
+                definitions_missing += d_missing
+                failed_chunks += extraction.failed
+                reused_extractions += reused
+                progress += 1
+                if on_progress:
+                    on_progress(progress, len(chunks))
     except IngestionCancelled:
         writer.delete_document(document.id)
         raise
@@ -307,6 +335,110 @@ def _ingest_loaded(
         ocr_pages_used=ocr_pages_used,
         elapsed_seconds=elapsed,
         resumed_chunks=resumed_chunks,
+        failed_chunks=failed_chunks,
+        reused_extractions=reused_extractions,
     )
     writer.mark_document_complete(result)
     return result
+
+
+def _chunk_size(settings: Settings, doc_type: DocType) -> int:
+    if doc_type == "patient_record":
+        return settings.patient_record_chunk_max_chars
+    return settings.textbook_chunk_max_chars
+
+
+_Extracted = tuple[ChunkExtraction, dict[str, Optional[Definition]]]
+
+
+def _extract_concurrently(
+    chunks: list[Chunk],
+    extractor: EntityExtractor,
+    definition_source: DefinitionSource,
+    max_concurrency: int,
+):
+    """Yields (chunk, extraction, definitions by entity id, reused) in chunk
+    order, while up to max_concurrency LLM extractions run in worker threads.
+
+    Only the caller writes to the graph, so writes stay sequential and a
+    chunk is only ever written once its extraction is done. A few chunks are
+    queued ahead of the workers so the next call starts the moment one
+    finishes, but no more, so memory stays flat on huge documents. Chunks
+    whose text repeats an earlier chunk of this run reuse its extraction
+    (with fresh entity ids) instead of calling the LLM again.
+
+    If the caller stops early (cancel, error), queued chunks are dropped and
+    the extractions still running finish in the background unwritten."""
+    max_concurrency = max(1, max_concurrency)
+    slots = _llm_semaphore(max_concurrency)
+
+    def work(chunk: Chunk) -> _Extracted:
+        with slots:
+            extraction = extractor.extract(chunk)
+        definitions = {
+            entity.id: definition_source.lookup(entity.normalized_name, entity.entity_type)
+            for entity in extraction.entities
+        }
+        return extraction, definitions
+
+    by_text: dict[str, Future] = {}
+    pending: deque[tuple[Chunk, Future, bool]] = deque()
+    queue_ahead = max_concurrency * 2
+    executor = ThreadPoolExecutor(max_workers=max_concurrency, thread_name_prefix="ingest-extract")
+    completed = False
+    try:
+        remaining = iter(chunks)
+        while True:
+            while len(pending) < queue_ahead:
+                chunk = next(remaining, None)
+                if chunk is None:
+                    break
+                earlier = by_text.get(chunk.text)
+                if earlier is not None:
+                    pending.append((chunk, earlier, True))
+                else:
+                    future = executor.submit(work, chunk)
+                    by_text[chunk.text] = future
+                    pending.append((chunk, future, False))
+            if not pending:
+                break
+            chunk, future, reused = pending.popleft()
+            extraction, definitions = future.result()
+            if reused:
+                if extraction.failed:
+                    # Don't copy a failure; try this chunk on its own.
+                    extraction, definitions = work(chunk)
+                    reused = False
+                else:
+                    extraction, definitions = _copy_extraction(extraction, definitions, chunk)
+            elif len(by_text) > 10_000:
+                by_text.clear()  # bound memory on very large documents
+            yield chunk, extraction, definitions, reused
+        completed = True
+    finally:
+        executor.shutdown(wait=completed, cancel_futures=True)
+
+
+def _copy_extraction(
+    extraction: ChunkExtraction, definitions: dict[str, Optional[Definition]], chunk: Chunk
+) -> _Extracted:
+    """The same entities and relations for another chunk with identical
+    text, under new ids so each chunk keeps its own Entity nodes."""
+    new_ids: dict[str, str] = {}
+    entities: list[Entity] = []
+    new_definitions: dict[str, Optional[Definition]] = {}
+    for entity in extraction.entities:
+        copy = entity.model_copy(update={"id": str(uuid.uuid4()), "chunk_id": chunk.id, "doc_id": chunk.doc_id})
+        new_ids[entity.id] = copy.id
+        new_definitions[copy.id] = definitions.get(entity.id)
+        entities.append(copy)
+    relations = [
+        EntityRelation(
+            source_entity_id=new_ids[r.source_entity_id],
+            target_entity_id=new_ids[r.target_entity_id],
+            relation_type=r.relation_type,
+        )
+        for r in extraction.relations
+        if r.source_entity_id in new_ids and r.target_entity_id in new_ids
+    ]
+    return ChunkExtraction(chunk_id=chunk.id, entities=entities, relations=relations), new_definitions
