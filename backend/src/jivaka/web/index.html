@@ -140,12 +140,31 @@
     overflow-y: auto;
   }
   .graph-detail.empty { color: var(--muted); }
+  .model-bar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 1.1rem;
+    padding: 0.55rem 0.9rem; margin: -1rem 0 1.5rem;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--panel); font-size: 0.82rem; color: var(--muted);
+  }
+  .model-bar .item { display: inline-flex; align-items: center; gap: 0.4rem; min-width: 0; }
+  .model-bar .item.selected { color: var(--fg); font-weight: 500; }
+  .model-bar .model { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+  .provider { padding: 0 0.45rem; border-radius: 999px; border: 1px solid currentColor; font-size: 0.72rem; white-space: nowrap; }
+  .provider.openrouter { color: var(--warning); }
+  .provider.ollama { color: var(--success); }
+  .model-note { font-size: 0.8rem; color: var(--muted); margin: -0.6rem 0 1rem; }
+  @media (max-width: 600px) {
+    .doc-list li { flex-wrap: wrap; }
+    .doc-list .meta { flex-wrap: wrap; white-space: normal; }
+  }
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Jivaka</h1>
   <p class="subtitle">Upload a document to build its portion of the trinity knowledge graph. · <a href="/chat" style="color: var(--accent);">Ask questions in chat</a></p>
+
+  <div class="model-bar" id="model-bar" role="status" aria-live="polite">Loading models…</div>
 
   <div class="panel">
     <h2>Ingest a document</h2>
@@ -158,6 +177,7 @@
         <option value="patient_record">patient_record</option>
         <option value="textbook">textbook</option>
       </select>
+      <p class="model-note" id="model-note"></p>
 
       <button type="submit" id="submit-btn">Ingest</button>
     </form>
@@ -242,6 +262,9 @@ function jobRow(job) {
   }
   const meta = el("span", { class: "meta" }, [
     badge(status, text),
+    ...(job.model && (job.status === "running" || job.status === "queued")
+      ? [providerTag(job.model.provider, job.model.model)]
+      : []),
     el("span", { text: `${job.doc_type} · ${formatTime(job.created_at * 1000)}` }),
   ]);
   if ((job.status === "running" || job.status === "queued") && !job.cancel_requested) {
@@ -887,6 +910,53 @@ document.getElementById("ingest-form").addEventListener("submit", async (evt) =>
   }
 });
 
+// --- Model status bar ---
+const PROVIDER_LABELS = { ollama: "Ollama (local)", openrouter: "OpenRouter (cloud)" };
+let models = null;
+
+function providerTag(provider, model) {
+  const tag = el("span", { class: `provider ${provider}`, text: PROVIDER_LABELS[provider] || provider });
+  if (model) tag.title = model;
+  return tag;
+}
+
+function modelItem(label, info, selected) {
+  return el("span", { class: `item${selected ? " selected" : ""}` }, [
+    el("span", { text: label }),
+    providerTag(info.provider),
+    el("span", { class: "model", text: info.model || "(no model set)" }),
+  ]);
+}
+
+function renderModels() {
+  const bar = document.getElementById("model-bar");
+  const note = document.getElementById("model-note");
+  if (!models) return;
+  const docType = document.getElementById("doc_type").value;
+  bar.innerHTML = "";
+  bar.appendChild(modelItem("Textbooks:", models.ingest.textbook, docType === "textbook"));
+  bar.appendChild(modelItem("Patient records:", models.ingest.patient_record, docType === "patient_record"));
+  bar.appendChild(modelItem("Chat:", models.chat, false));
+  const chosen = models.ingest[docType];
+  note.textContent = chosen
+    ? `Will be extracted with ${chosen.model || "(no model set)"} on ${PROVIDER_LABELS[chosen.provider] || chosen.provider}.`
+    : "";
+}
+
+async function loadModels() {
+  try {
+    const res = await fetch(`${API}/models`);
+    if (!res.ok) throw new Error();
+    models = await res.json();
+    renderModels();
+  } catch (e) {
+    document.getElementById("model-bar").textContent = "Couldn't load which models are in use.";
+  }
+}
+
+document.getElementById("doc_type").addEventListener("change", renderModels);
+
+loadModels();
 loadRecentDocuments();
 </script>
 </body>

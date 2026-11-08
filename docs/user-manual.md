@@ -62,6 +62,7 @@ then `docker compose up -d backend` to restart it with the new settings.
 - `OPENROUTER_DENY_DATA_COLLECTION=true` (default) only uses providers that don't store or train on prompts.
 - **Patient records still go to Ollama** unless `OPENROUTER_FOR_PATIENT_RECORDS=true`. They are de-identified before extraction, so the model only sees the de-identified text, but de-identification can miss identifiers, so sending them to a cloud API is an explicit opt-in.
 - Chat keeps using Ollama, so `OLLAMA_MODEL` is still required.
+- The ingest page shows which model each document type and chat use, in a bar under the title (also at `GET /models`), and tags each running ingest with its provider.
 - Cost is per token: roughly one call of about 650 input and 300 output tokens per 1,500-character chunk. Check the model's price on OpenRouter before a big ingest.
 
 ### Reusing an existing Ollama instead of the bundled one
