@@ -252,14 +252,35 @@ function jobRow(job) {
     });
     meta.appendChild(btn);
   }
+  if (job.status === "cancelled" || job.status === "failed") {
+    const btn = el("button", { class: "link", type: "button", text: "✕", title: "Remove from list" });
+    btn.setAttribute("aria-label", "Remove from list");
+    btn.addEventListener("click", (evt) => {
+      evt.stopPropagation();
+      dismissJob(job);
+    });
+    meta.appendChild(btn);
+  }
   const item = el("li", {}, [name, meta]);
   if (job.doc_id) item.addEventListener("click", () => showGraph(job.doc_id));
   return item;
 }
 
-async function deleteDocument(doc) {
+async function dismissJob(job) {
+  const res = await fetch(`${API}/jobs/${job.id}`, { method: "DELETE" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    setStatusText("error", body.detail || `Could not remove ${displayName(job.filename)}.`);
+  }
+  loadRecentDocuments();
+}
+
+async function deleteDocument(doc, interrupted) {
   const name = displayName(doc.filename) || doc.id;
-  if (!confirm(`Delete the interrupted ingest of ${name}? Everything it added to the graph will be removed.`)) return;
+  const question = interrupted
+    ? `Delete the interrupted ingest of ${name}? Everything it added to the graph will be removed.`
+    : `Delete ${name}? Its chunks and entities are removed from the graph and the uploaded file is deleted. This can't be undone.`;
+  if (!confirm(question)) return;
   const res = await fetch(`${API}/documents/${doc.id}`, { method: "DELETE" });
   if (res.ok) {
     setStatusText("", `Deleted: ${name}.`);
@@ -281,13 +302,13 @@ function docRow(doc) {
   ]);
   if (status === "interrupted") {
     item.title = "Ingestion stopped before finishing (for example the server restarted). Upload the same file again to continue where it stopped, or delete it.";
-    const btn = el("button", { class: "link", type: "button", text: "Delete" });
-    btn.addEventListener("click", (evt) => {
-      evt.stopPropagation();
-      deleteDocument(doc);
-    });
-    item.querySelector(".meta").appendChild(btn);
   }
+  const btn = el("button", { class: "link", type: "button", text: "Delete" });
+  btn.addEventListener("click", (evt) => {
+    evt.stopPropagation();
+    deleteDocument(doc, status === "interrupted");
+  });
+  item.querySelector(".meta").appendChild(btn);
   item.addEventListener("click", () => showGraph(doc.id));
   return item;
 }

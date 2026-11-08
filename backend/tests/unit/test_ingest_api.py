@@ -136,39 +136,64 @@ def test_ingest_rejects_unsupported_file_type(monkeypatch, tmp_path):
 
 
 class _FakeDeleteGraph:
-    def __init__(self, complete):
-        self.complete = complete
+    def __init__(self, filename="doc.pdf"):
+        self.filename = filename
         self.queries = []
 
     def query(self, cypher, params=None):
         self.queries.append(cypher)
-        rows = [] if self.complete == "missing" else [[self.complete]]
-        return type("R", (), {"result_set": rows if "RETURN d.ingestion_complete" in cypher else []})()
+        rows = [] if self.filename is None else [[self.filename]]
+        return type("R", (), {"result_set": rows if "RETURN d.filename" in cypher else []})()
 
 
-def test_delete_removes_an_interrupted_document(monkeypatch):
-    graph = _FakeDeleteGraph(complete=False)
+def _upload_dir(monkeypatch, tmp_path):
+    monkeypatch.setattr(routes, "get_settings", lambda: type("S", (), {"upload_dir": str(tmp_path)})())
+
+
+def test_delete_removes_a_document_and_its_upload(monkeypatch, tmp_path):
+    _upload_dir(monkeypatch, tmp_path)
+    (tmp_path / "abc_doc.pdf").write_bytes(b"x")
+    (tmp_path / "other.pdf").write_bytes(b"x")
+    graph = _FakeDeleteGraph(filename="abc_doc.pdf")
     monkeypatch.setattr(routes, "get_graph", lambda: graph)
 
     response = TestClient(app).delete("/documents/doc-1")
 
     assert response.status_code == 200
     assert any("DETACH DELETE d" in q for q in graph.queries)
+    assert [p.name for p in tmp_path.iterdir()] == ["other.pdf"]
 
 
-def test_delete_refuses_finished_missing_and_running_documents(monkeypatch):
+def test_delete_refuses_missing_and_running_documents(monkeypatch, tmp_path):
+    _upload_dir(monkeypatch, tmp_path)
     client = TestClient(app)
-    for complete, expected in ((True, 409), (None, 409), ("missing", 404)):
-        graph = _FakeDeleteGraph(complete=complete)
-        monkeypatch.setattr(routes, "get_graph", lambda: graph)
-        assert client.delete("/documents/doc-1").status_code == expected
-        assert not any("DETACH DELETE" in q for q in graph.queries)
+    graph = _FakeDeleteGraph(filename=None)
+    monkeypatch.setattr(routes, "get_graph", lambda: graph)
+    assert client.delete("/documents/doc-1").status_code == 404
+    assert not any("DETACH DELETE" in q for q in graph.queries)
 
     job = routes.job_registry.create_job(filename="big.pdf", doc_type="textbook")
     routes.job_registry.update_job(job.id, status=routes.job_registry.JobStatus.running, doc_id="doc-running")
-    graph = _FakeDeleteGraph(complete=False)
+    graph = _FakeDeleteGraph()
     monkeypatch.setattr(routes, "get_graph", lambda: graph)
     response = client.delete("/documents/doc-running")
     assert response.status_code == 409
     assert "Cancel" in response.json()["detail"]
+    assert not any("DETACH DELETE" in q for q in graph.queries)
     routes.job_registry.update_job(job.id, status=routes.job_registry.JobStatus.cancelled)
+
+
+def test_dismiss_removes_finished_jobs_only():
+    client = TestClient(app)
+    registry = routes.job_registry
+    cancelled = registry.create_job(filename="a.txt", doc_type="textbook")
+    registry.update_job(cancelled.id, status=registry.JobStatus.cancelled)
+    running = registry.create_job(filename="b.txt", doc_type="textbook")
+    registry.update_job(running.id, status=registry.JobStatus.running)
+
+    assert client.delete(f"/jobs/{cancelled.id}").status_code == 200
+    assert registry.get_job(cancelled.id) is None
+    assert client.delete(f"/jobs/{running.id}").status_code == 409
+    assert registry.get_job(running.id) is not None
+    assert client.delete("/jobs/nope").status_code == 404
+    registry.update_job(running.id, status=registry.JobStatus.cancelled)

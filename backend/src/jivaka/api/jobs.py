@@ -105,3 +105,14 @@ def request_cancel(job_id: str) -> Optional[Job]:
     if job.status in ACTIVE_STATUSES:
         update_job(job_id, cancel_requested=True)
     return job
+
+
+def dismiss_job(job_id: str) -> Optional[Job]:
+    """Removes a finished (succeeded, failed or cancelled) job from the
+    listing. Returns the job, or None if there is no such job. Active jobs
+    are left in place and returned unchanged; cancel them first."""
+    with _lock:
+        job = _jobs.get(job_id)
+        if job is not None and job.status not in ACTIVE_STATUSES:
+            del _jobs[job_id]
+    return job
