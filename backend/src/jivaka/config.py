@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -46,6 +47,26 @@ class Settings(BaseSettings):
     # Extra attempts for a chunk whose extraction failed (timeout, Ollama
     # error, invalid JSON) before it is recorded with no entities.
     ingest_extraction_retries: int = 1
+
+    # Which LLM does entity extraction during ingestion: "ollama" (local,
+    # the default) or "openrouter" (cloud API, needs OPENROUTER_API_KEY and
+    # OPENROUTER_MODEL). Chat always uses Ollama.
+    ingest_llm_provider: Literal["ollama", "openrouter"] = "ollama"
+    openrouter_api_key: str = ""
+    openrouter_model: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_request_timeout_seconds: float = 120.0
+    # Extractions sent to OpenRouter at once. Used instead of
+    # INGEST_MAX_CONCURRENCY when OpenRouter does the extraction.
+    openrouter_max_concurrency: int = 16
+    # Ask OpenRouter to route only to providers that don't store or train on
+    # prompts. Leaves fewer providers to choose from for some models.
+    openrouter_deny_data_collection: bool = True
+    # Patient records stay on Ollama even when INGEST_LLM_PROVIDER is
+    # openrouter, unless this is turned on. They are de-identified before
+    # extraction, but de-identification can miss things, so sending them to
+    # a cloud API is an explicit choice.
+    openrouter_for_patient_records: bool = False
 
     # Chat: how many chunks are given to the model as sources per answer.
     retrieval_top_k: int = 6
