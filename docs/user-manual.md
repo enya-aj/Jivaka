@@ -117,7 +117,7 @@ None of these touch volumes or bind-mounted data (FalkorDB's graph, `data/upload
 
 ## 4. Ingesting a document
 
-**Easiest: the web page.** Open `http://localhost:${BACKEND_PORT}` (default [http://localhost:8000](http://localhost:8000)) in a browser — upload a file, pick `patient_record`/`textbook`, and watch the status update (queued → running, with a `chunk N/M` progress marker → succeeded/failed) until the resulting graph renders below. A "recent documents" list lets you revisit past ingests without remembering their `doc_id`. See §6 for what's happening under the hood.
+**Easiest: the web page.** Open `http://localhost:${BACKEND_PORT}` (default [http://localhost:8000](http://localhost:8000)) in a browser — upload a file, pick `patient_record`/`textbook`, and watch the status update (queued → running, with a `chunk N/M` progress marker → succeeded/failed) until the resulting graph renders below. A "recent documents" list lets you revisit past ingests without remembering their `doc_id`. The bar at the bottom of the page shows which LLM extracts entities: the provider and model of each running ingest, or, when nothing is running, the one each document type would use (also available from `GET /ingest/llm`). See §6 for what's happening under the hood.
 
 **Or the CLI**, from within the `data/uploads/` folder (bind-mounted into the backend container):
 
