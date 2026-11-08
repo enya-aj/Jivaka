@@ -53,10 +53,30 @@ def test_write_chunk_extraction_writes_entities_definitions_and_relations():
     assert matched == 1
     assert missing == 1
 
-    cyphers = [c for c, _ in graph.calls]
-    assert sum("MERGE (e:Entity" in c for c in cyphers) == 2
-    assert sum("MERGE (def:Definition" in c for c in cyphers) == 1
-    assert sum("MERGE (a)-[:RELATED_TO" in c for c in cyphers) == 1
+    # One batched query per kind, not one per item.
+    assert len(graph.calls) == 3
+    (entity_cypher, entity_params), (def_cypher, def_params), (rel_cypher, rel_params) = graph.calls
+    assert "UNWIND $entities" in entity_cypher and "MERGE (e:Entity" in entity_cypher
+    assert [row["name"] for row in entity_params["entities"]] == ["fever", "amoxicillin"]
+    assert "MERGE (def:Definition" in def_cypher
+    assert [(row["entity_id"], row["normalized_term"]) for row in def_params["rows"]] == [(fever.id, "fever")]
+    assert "MERGE (a)-[:RELATED_TO" in rel_cypher
+    assert rel_params["rows"] == [{"source_id": amox.id, "target_id": fever.id, "relation_type": "treats"}]
+
+
+def test_write_extracted_chunk_marks_the_chunk_finished_last():
+    from jivaka.ingestion.models import Chunk
+
+    graph = FakeGraph()
+    writer = GraphWriter(graph)
+    chunk = Chunk(doc_id="d1", text="no entities here", order=0, source_type="textbook")
+
+    counts = writer.write_extracted_chunk(chunk, ChunkExtraction(chunk_id=chunk.id), {})
+
+    assert counts == (0, 0, 0, 0)
+    assert len(graph.calls) == 2  # chunk (+ entities), then the flag
+    assert "MERGE (c:Chunk" in graph.calls[0][0] and "c.extracted = false" in graph.calls[0][0]
+    assert "SET c.extracted = true" in graph.calls[1][0]
 
 
 def test_write_definition_merges_on_normalized_term_not_id():
