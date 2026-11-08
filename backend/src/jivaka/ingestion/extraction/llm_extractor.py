@@ -1,10 +1,10 @@
 import logging
 import time
-from typing import Optional, get_args
+from typing import Optional, Union, get_args
 
 from jivaka.config import get_settings
 from jivaka.ingestion.extraction.base import EntityExtractor
-from jivaka.ingestion.extraction.llm_client import OllamaClient
+from jivaka.ingestion.extraction.llm_client import OllamaClient, OpenRouterClient
 from jivaka.ingestion.models import Chunk, ChunkExtraction, Entity, EntityRelation, EntityType
 from jivaka.ingestion.text_utils import normalize_term
 
@@ -35,7 +35,7 @@ class LLMEntityExtractor(EntityExtractor):
     """Safe to call from several threads at once (the pipeline runs
     extractions concurrently); the underlying httpx client is thread-safe."""
 
-    def __init__(self, client: Optional[OllamaClient] = None, retries: Optional[int] = None):
+    def __init__(self, client: Optional[Union[OllamaClient, OpenRouterClient]] = None, retries: Optional[int] = None):
         self.client = client or OllamaClient()
         self.retries = get_settings().ingest_extraction_retries if retries is None else retries
 

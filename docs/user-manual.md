@@ -27,6 +27,10 @@ Edit `.env`:
 | `OLLAMA_MODEL` | **Required.** Model used for entity/relation extraction | *(none — must be set)* |
 | `OLLAMA_REQUEST_TIMEOUT_SECONDS` | How long to wait for Ollama to send more of a chunk's extraction before giving up. Replies are streamed, so a long extraction that keeps producing output is not cut off | `300` |
 | `INGEST_MAX_CONCURRENCY` | Most chunk extractions sent to Ollama at once, across all running ingests (see [Large documents](#large-documents)) | `2` |
+| `INGEST_LLM_PROVIDER` | `ollama` or `openrouter`: which LLM extracts entities during ingestion (see [Ingesting with OpenRouter](#ingesting-with-openrouter-instead-of-ollama)) | `ollama` |
+| `OPENROUTER_API_KEY` / `OPENROUTER_MODEL` | OpenRouter key and model id, when `INGEST_LLM_PROVIDER=openrouter` | none |
+| `OPENROUTER_MAX_CONCURRENCY` | Extractions sent to OpenRouter at once | `16` |
+| `OPENROUTER_FOR_PATIENT_RECORDS` | Also send (de-identified) patient records to OpenRouter | `false` |
 | `INGEST_EXTRACTION_RETRIES` | Extra attempts for a chunk whose extraction failed before it is stored with no entities | `1` |
 | `TEXTBOOK_CHUNK_MAX_CHARS` / `PATIENT_RECORD_CHUNK_MAX_CHARS` | Chunk size in characters. Bigger chunks mean fewer LLM calls | `1500` / `1200` |
 | `DEFINITION_SOURCE` | `stub` (curated offline dataset) or `umls` (not yet implemented) | `stub` |
@@ -42,6 +46,23 @@ Chunking never calls the LLM: text is split by paragraphs (and, for patient reco
 - Chunks whose text repeats an earlier chunk of the same file (boilerplate, repeated XML fields) reuse that chunk's extraction instead of calling Ollama again. The ingest result reports these as `reused_extractions`.
 - A chunk whose extraction still fails after `INGEST_EXTRACTION_RETRIES` is stored with no entities and counted in `failed_chunks`, rather than stopping the whole ingest.
 - Raising the chunk sizes cuts the number of LLM calls, at the cost of longer prompts per call. Changing them only affects new ingests.
+
+### Ingesting with OpenRouter instead of Ollama
+
+For very large documents (for example the NCIt thesaurus, about 67,000 chunks), a CPU-only Ollama is far too slow. Ingestion can send its extraction calls to a cloud model on [OpenRouter](https://openrouter.ai) instead. Add to `.env` (git-ignored, never commit the key):
+```bash
+INGEST_LLM_PROVIDER=openrouter
+OPENROUTER_API_KEY=sk-or-...
+OPENROUTER_MODEL=google/gemini-2.5-flash-lite
+```
+then `docker compose up -d backend` to restart it with the new settings.
+
+- The model must support JSON mode. Requests ask OpenRouter to route only to providers that honour it.
+- `OPENROUTER_MAX_CONCURRENCY` (default `16`) extractions run at once instead of `INGEST_MAX_CONCURRENCY`. Rate-limit (429) and server errors are retried with backoff; lower it if the logs show many retries.
+- `OPENROUTER_DENY_DATA_COLLECTION=true` (default) only uses providers that don't store or train on prompts.
+- **Patient records still go to Ollama** unless `OPENROUTER_FOR_PATIENT_RECORDS=true`. They are de-identified before extraction, so the model only sees the de-identified text, but de-identification can miss identifiers, so sending them to a cloud API is an explicit opt-in.
+- Chat keeps using Ollama, so `OLLAMA_MODEL` is still required.
+- Cost is per token: roughly one call of about 650 input and 300 output tokens per 1,500-character chunk. Check the model's price on OpenRouter before a big ingest.
 
 ### Reusing an existing Ollama instead of the bundled one
 

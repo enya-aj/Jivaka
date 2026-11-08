@@ -1,3 +1,4 @@
+import logging
 import threading
 import uuid
 import time
@@ -16,6 +17,7 @@ from jivaka.db.schema import ensure_schema
 from jivaka.deid import Deidentifier, build_deidentifier
 from jivaka.ingestion.chunking.selector import get_chunker
 from jivaka.ingestion.extraction.base import EntityExtractor
+from jivaka.ingestion.extraction.llm_client import OpenRouterClient, build_extraction_client
 from jivaka.ingestion.extraction.llm_extractor import LLMEntityExtractor
 from jivaka.ingestion.graph_writer import GraphWriter
 from jivaka.ingestion.intake import LoadedDocument, load_document
@@ -34,6 +36,8 @@ from jivaka.ingestion.models import (
 from jivaka.ingestion.ocr.detector import needs_ocr
 from jivaka.ingestion.ocr.easyocr_backend import ocr_image
 
+logger = logging.getLogger(__name__)
+
 
 # Serializes ingests of identical content within this process, so two
 # concurrent uploads of the same file can't both pass the duplicate check (or
@@ -44,15 +48,18 @@ _hash_locks: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)
 # Caps LLM extractions running at once across every ingest in this process
 # (FastAPI runs each upload's ingest in its own thread), so several uploads
 # share the Ollama host instead of each adding INGEST_MAX_CONCURRENCY calls.
-_llm_slots: dict[int, threading.BoundedSemaphore] = {}
+# Each provider has its own slots, so an OpenRouter ingest doesn't hold up a
+# patient record extracting on Ollama.
+_llm_slots: dict[tuple[str, int], threading.BoundedSemaphore] = {}
 _llm_slots_lock = threading.Lock()
 
 
-def _llm_semaphore(size: int) -> threading.BoundedSemaphore:
+def _llm_semaphore(provider: str, size: int) -> threading.BoundedSemaphore:
     with _llm_slots_lock:
-        if size not in _llm_slots:
-            _llm_slots[size] = threading.BoundedSemaphore(size)
-        return _llm_slots[size]
+        key = (provider, size)
+        if key not in _llm_slots:
+            _llm_slots[key] = threading.BoundedSemaphore(size)
+        return _llm_slots[key]
 
 
 class IngestionCancelled(Exception):
@@ -78,7 +85,13 @@ def ingest_document(
     finished). Either may raise IngestionCancelled to stop the run."""
     start = time.monotonic()
     settings = get_settings()
-    extractor = extractor or LLMEntityExtractor()
+    provider, max_concurrency = "ollama", settings.ingest_max_concurrency
+    if extractor is None:
+        client = build_extraction_client(doc_type)
+        if isinstance(client, OpenRouterClient):
+            provider, max_concurrency = "openrouter", settings.openrouter_max_concurrency
+        extractor = LLMEntityExtractor(client=client)
+        logger.info("Extracting %s with %s (%s at once)", path.name, provider, max_concurrency)
     definition_source = definition_source or get_definition_source(settings.definition_source)
 
     ensure_schema(graph)
@@ -103,6 +116,7 @@ def ingest_document(
             deidentifier,
             on_document,
             resume_from=interrupted,
+            llm=(provider, max_concurrency),
         )
 
 
@@ -219,7 +233,9 @@ def _ingest_loaded(
     deidentifier: Optional[Deidentifier],
     on_document: Optional[Callable[[str], None]] = None,
     resume_from: Optional[dict] = None,
+    llm: Optional[tuple[str, int]] = None,
 ) -> IngestionResult:
+    llm = llm or ("ollama", settings.ingest_max_concurrency)
     ocr_pages_used = 0
     page_texts: list[str] = []
     for page in loaded.pages:
@@ -306,7 +322,7 @@ def _ingest_loaded(
         failed_chunks = 0
         reused_extractions = 0
         progress = resumed_chunks
-        extracted = _extract_concurrently(todo, extractor, definition_source, settings.ingest_max_concurrency)
+        extracted = _extract_concurrently(todo, extractor, definition_source, *llm)
         with closing(extracted):  # stops the workers right away if this loop raises
             for chunk, extraction, definitions, reused in extracted:
                 e_count, r_count, d_matched, d_missing = writer.write_extracted_chunk(chunk, extraction, definitions)
@@ -355,6 +371,7 @@ def _extract_concurrently(
     chunks: list[Chunk],
     extractor: EntityExtractor,
     definition_source: DefinitionSource,
+    provider: str,
     max_concurrency: int,
 ):
     """Yields (chunk, extraction, definitions by entity id, reused) in chunk
@@ -370,7 +387,7 @@ def _extract_concurrently(
     If the caller stops early (cancel, error), queued chunks are dropped and
     the extractions still running finish in the background unwritten."""
     max_concurrency = max(1, max_concurrency)
-    slots = _llm_semaphore(max_concurrency)
+    slots = _llm_semaphore(provider, max_concurrency)
 
     def work(chunk: Chunk) -> _Extracted:
         with slots:
