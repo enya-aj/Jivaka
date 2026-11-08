@@ -110,6 +110,18 @@ async def cancel_job_endpoint(job_id: str) -> dict:
     return job.to_dict()
 
 
+@router.delete("/jobs/{job_id}")
+async def dismiss_job_endpoint(job_id: str) -> dict:
+    """Removes a cancelled, failed or finished job from Recent documents.
+    Its document, if any, is untouched."""
+    job = job_registry.dismiss_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status in job_registry.ACTIVE_STATUSES:
+        raise HTTPException(status_code=409, detail="This ingest is still running. Cancel it first.")
+    return {"dismissed": job_id}
+
+
 @router.get("/documents")
 async def list_documents_endpoint(limit: int = 50) -> list[dict]:
     graph = get_graph()
@@ -123,18 +135,20 @@ async def list_documents_endpoint(limit: int = 50) -> list[dict]:
 
 @router.delete("/documents/{doc_id}")
 async def delete_document_endpoint(doc_id: str) -> dict:
-    """Deletes an interrupted document (one whose ingest stopped before
-    finishing) with its chunks and entities. Finished documents and ones an
-    ingest is still writing can't be deleted here."""
+    """Deletes a document (finished or interrupted) with its chunks and
+    entities, plus its uploaded file. Shared Definition nodes stay. A
+    document an ingest is still writing can't be deleted; cancel it instead."""
     if any(job.doc_id == doc_id for job in job_registry.list_jobs() if job.status in job_registry.ACTIVE_STATUSES):
         raise HTTPException(status_code=409, detail="This document is still being ingested. Cancel the ingest instead.")
     graph = get_graph()
-    rows = graph.query("MATCH (d:Document {id: $id}) RETURN d.ingestion_complete", params={"id": doc_id}).result_set
+    rows = graph.query("MATCH (d:Document {id: $id}) RETURN d.filename", params={"id": doc_id}).result_set
     if not rows:
         raise HTTPException(status_code=404, detail="Document not found")
-    if rows[0][0] is not False:
-        raise HTTPException(status_code=409, detail="Only interrupted documents can be deleted.")
     GraphWriter(graph).delete_document(doc_id)
+    filename = rows[0][0]
+    if filename:
+        # Only a bare name inside the upload folder, never a path elsewhere.
+        (Path(get_settings().upload_dir) / Path(filename).name).unlink(missing_ok=True)
     return {"deleted": doc_id}
 
 
