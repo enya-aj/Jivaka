@@ -182,9 +182,22 @@ def build_extraction_client(doc_type: Optional[str] = None):
     """The client ingestion should use for this document type, following
     INGEST_LLM_PROVIDER. Patient records stay on Ollama unless
     OPENROUTER_FOR_PATIENT_RECORDS is on."""
-    settings = get_settings()
-    if settings.ingest_llm_provider == "openrouter" and (
-        doc_type != "patient_record" or settings.openrouter_for_patient_records
-    ):
+    if _uses_openrouter(doc_type):
         return OpenRouterClient()
     return OllamaClient()
+
+
+def extraction_llm(doc_type: Optional[str] = None) -> dict:
+    """The provider and model build_extraction_client would pick for this
+    document type, read from settings without building a client."""
+    settings = get_settings()
+    if _uses_openrouter(doc_type):
+        return {"provider": "openrouter", "model": settings.openrouter_model}
+    return {"provider": "ollama", "model": settings.ollama_model}
+
+
+def _uses_openrouter(doc_type: Optional[str]) -> bool:
+    settings = get_settings()
+    return settings.ingest_llm_provider == "openrouter" and (
+        doc_type != "patient_record" or settings.openrouter_for_patient_records
+    )

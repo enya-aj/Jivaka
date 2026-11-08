@@ -1,5 +1,6 @@
 import shutil
 from pathlib import Path
+from typing import get_args
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
@@ -8,6 +9,7 @@ from jivaka.api import jobs as job_registry
 from jivaka.config import get_settings
 from jivaka.db.falkor_client import get_graph
 from jivaka.db.graph_reader import get_document_graph, list_documents
+from jivaka.ingestion.extraction.llm_client import extraction_llm
 from jivaka.ingestion.graph_writer import GraphWriter
 from jivaka.ingestion.intake import SUPPORTED_EXTENSIONS
 from jivaka.ingestion.models import DocType
@@ -40,9 +42,18 @@ async def ingest_endpoint(
     with dest.open("wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    job = job_registry.create_job(filename=file.filename or dest.name, doc_type=doc_type)
+    job = job_registry.create_job(
+        filename=file.filename or dest.name, doc_type=doc_type, llm=extraction_llm(doc_type)
+    )
     background_tasks.add_task(_run_ingest_job, job.id, dest, doc_type)
     return {"job_id": job.id, "status": job.status}
+
+
+@router.get("/ingest/llm")
+async def ingest_llm_endpoint() -> dict:
+    """Which provider and model extract entities for each document type, so
+    the ingestion page can show it. Follows .env as loaded at startup."""
+    return {doc_type: extraction_llm(doc_type) for doc_type in get_args(DocType)}
 
 
 def _run_ingest_job(job_id: str, path: Path, doc_type: DocType) -> None:

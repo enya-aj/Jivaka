@@ -29,6 +29,9 @@ class Job:
     # Set once the pipeline has written the Document node, so the page can
     # match this job to its (still incomplete) row in GET /documents.
     doc_id: Optional[str] = None
+    # {"provider", "model"} doing this job's entity extraction, as configured
+    # when the job was created.
+    llm: Optional[dict] = None
     cancel_requested: bool = False
     result: Optional[IngestionResult] = None
     error: Optional[str] = None
@@ -43,6 +46,7 @@ class Job:
             "status": self.status,
             "progress": self.progress,
             "doc_id": self.doc_id,
+            "llm": self.llm,
             "cancel_requested": self.cancel_requested,
             "result": self.result,
             "error": self.error,
@@ -62,8 +66,8 @@ _lock = threading.Lock()
 FINISHED_JOB_TTL_SECONDS = 24 * 3600
 
 
-def create_job(filename: str = "", doc_type: str = "") -> Job:
-    job = Job(id=str(uuid.uuid4()), filename=filename, doc_type=doc_type)
+def create_job(filename: str = "", doc_type: str = "", llm: Optional[dict] = None) -> Job:
+    job = Job(id=str(uuid.uuid4()), filename=filename, doc_type=doc_type, llm=llm)
     with _lock:
         _jobs[job.id] = job
     return job

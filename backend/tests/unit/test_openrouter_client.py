@@ -9,6 +9,7 @@ from jivaka.ingestion.extraction.llm_client import (
     OpenRouterClient,
     _parse_json_reply,
     build_extraction_client,
+    extraction_llm,
 )
 
 
@@ -102,3 +103,13 @@ def test_build_extraction_client_keeps_patient_records_local_by_default(
     monkeypatch.setattr(settings, "openrouter_api_key", "k")
     monkeypatch.setattr(settings, "openrouter_model", "m")
     assert isinstance(build_extraction_client(doc_type), expected)
+
+
+def test_extraction_llm_names_the_model_build_extraction_client_would_use(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "ingest_llm_provider", "openrouter")
+    monkeypatch.setattr(settings, "openrouter_for_patient_records", False)
+    monkeypatch.setattr(settings, "openrouter_model", "vendor/model:free")
+    monkeypatch.setattr(settings, "ollama_model", "local-model")
+    assert extraction_llm("textbook") == {"provider": "openrouter", "model": "vendor/model:free"}
+    assert extraction_llm("patient_record") == {"provider": "ollama", "model": "local-model"}

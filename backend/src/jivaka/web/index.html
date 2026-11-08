@@ -140,6 +140,19 @@
     overflow-y: auto;
   }
   .graph-detail.empty { color: var(--muted); }
+  .model-bar {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem 0.9rem;
+    padding: 0.45rem 1.5rem;
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+    font-size: 0.8rem;
+    color: var(--muted);
+  }
+  .model-bar .label { font-weight: 600; }
+  .model-bar .item { overflow-wrap: anywhere; }
+  .model-bar .model { color: var(--fg); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .model-bar .spinner { width: 10px; height: 10px; border-width: 2px; }
 </style>
 </head>
 <body>
@@ -182,6 +195,7 @@
     <ul class="doc-list" id="doc-list"><li class="empty">Loading…</li></ul>
   </div>
 </div>
+<div class="model-bar" id="model-bar" role="status" aria-live="polite"><span class="label">Extraction model</span><span>Loading…</span></div>
 
 <script>
 const API = "";
@@ -336,6 +350,46 @@ async function handleFinishedJobs(jobs) {
   }
 }
 
+const PROVIDER_NAMES = { ollama: "Ollama", openrouter: "OpenRouter" };
+let ingestLlm = null;
+
+function llmItem(prefix, llm) {
+  const provider = PROVIDER_NAMES[llm.provider] || llm.provider;
+  return el("span", { class: "item" }, [
+    document.createTextNode(`${prefix}${provider} `),
+    el("span", { class: "model", text: llm.model || "(no model set)" }),
+  ]);
+}
+
+// Shows the model each running ingest is extracting with, or, when none is
+// running, the model each document type would use.
+function renderModelBar(jobs) {
+  const bar = document.getElementById("model-bar");
+  bar.innerHTML = "";
+  const running = jobs.filter((j) => j.status === "running" && j.llm);
+  if (running.length) {
+    bar.appendChild(el("span", { class: "spinner" }));
+    bar.appendChild(el("span", { class: "label", text: "Extracting with" }));
+    for (const job of running) bar.appendChild(llmItem(`${displayName(job.filename)}: `, job.llm));
+    return;
+  }
+  bar.appendChild(el("span", { class: "label", text: "Extraction model" }));
+  if (!ingestLlm) {
+    bar.appendChild(el("span", { text: "unknown" }));
+    return;
+  }
+  for (const [docType, llm] of Object.entries(ingestLlm)) bar.appendChild(llmItem(`${docType}: `, llm));
+}
+
+async function loadIngestLlm() {
+  try {
+    const res = await fetch(`${API}/ingest/llm`);
+    if (res.ok) ingestLlm = await res.json();
+  } catch (e) {
+    // Keep the last known models; the bar says "unknown" if there are none.
+  }
+}
+
 async function loadRecentDocuments() {
   clearTimeout(refreshTimer);
   const list = document.getElementById("doc-list");
@@ -348,6 +402,7 @@ async function loadRecentDocuments() {
   } catch (e) {
     list.innerHTML = "";
     list.appendChild(el("li", { class: "error", text: "Failed to load documents." }));
+    renderModelBar([]);
     refreshTimer = setTimeout(loadRecentDocuments, 5000);
     return;
   }
@@ -369,6 +424,7 @@ async function loadRecentDocuments() {
     for (const doc of shownDocs) list.appendChild(docRow(doc));
   }
 
+  renderModelBar(jobs);
   await handleFinishedJobs(jobs);
 
   const active = jobs.some((j) => j.status === "queued" || j.status === "running");
@@ -887,7 +943,7 @@ document.getElementById("ingest-form").addEventListener("submit", async (evt) =>
   }
 });
 
-loadRecentDocuments();
+loadIngestLlm().then(loadRecentDocuments);
 </script>
 </body>
 </html>

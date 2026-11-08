@@ -197,3 +197,21 @@ def test_dismiss_removes_finished_jobs_only():
     assert registry.get_job(running.id) is not None
     assert client.delete("/jobs/nope").status_code == 404
     registry.update_job(running.id, status=registry.JobStatus.cancelled)
+
+
+def test_ingest_llm_lists_the_model_for_each_doc_type(monkeypatch):
+    monkeypatch.setattr(routes, "extraction_llm", lambda doc_type: {"provider": "ollama", "model": f"m-{doc_type}"})
+    response = TestClient(app).get("/ingest/llm")
+    assert response.status_code == 200
+    assert response.json() == {
+        "patient_record": {"provider": "ollama", "model": "m-patient_record"},
+        "textbook": {"provider": "ollama", "model": "m-textbook"},
+    }
+
+
+def test_ingest_job_records_its_extraction_model(monkeypatch, tmp_path):
+    monkeypatch.setattr(routes, "get_settings", lambda: type("S", (), {"upload_dir": str(tmp_path)})())
+    monkeypatch.setattr(routes, "extraction_llm", lambda doc_type: {"provider": "openrouter", "model": "v/m"})
+    monkeypatch.setattr(routes, "_run_ingest_job", lambda *args: None)
+    job_id = _upload(TestClient(app))
+    assert get_job(job_id).to_dict()["llm"] == {"provider": "openrouter", "model": "v/m"}
