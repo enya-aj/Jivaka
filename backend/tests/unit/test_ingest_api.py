@@ -197,3 +197,19 @@ def test_dismiss_removes_finished_jobs_only():
     assert registry.get_job(running.id) is not None
     assert client.delete("/jobs/nope").status_code == 404
     registry.update_job(running.id, status=registry.JobStatus.cancelled)
+
+
+def test_models_endpoint_reports_each_doc_type(monkeypatch):
+    from jivaka.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "ingest_llm_provider", "openrouter")
+    monkeypatch.setattr(settings, "openrouter_model", "vendor/free-model:free")
+    monkeypatch.setattr(settings, "openrouter_for_patient_records", False)
+    monkeypatch.setattr(settings, "ollama_model", "llama3")
+
+    body = TestClient(app).get("/models").json()
+
+    assert body["ingest"]["textbook"] == {"provider": "openrouter", "model": "vendor/free-model:free"}
+    assert body["ingest"]["patient_record"] == {"provider": "ollama", "model": "llama3"}
+    assert body["chat"] == {"provider": "ollama", "model": "llama3"}

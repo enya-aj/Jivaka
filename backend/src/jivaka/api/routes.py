@@ -8,6 +8,7 @@ from jivaka.api import jobs as job_registry
 from jivaka.config import get_settings
 from jivaka.db.falkor_client import get_graph
 from jivaka.db.graph_reader import get_document_graph, list_documents
+from jivaka.ingestion.extraction.llm_client import describe_extraction_model
 from jivaka.ingestion.graph_writer import GraphWriter
 from jivaka.ingestion.intake import SUPPORTED_EXTENSIONS
 from jivaka.ingestion.models import DocType
@@ -40,7 +41,9 @@ async def ingest_endpoint(
     with dest.open("wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    job = job_registry.create_job(filename=file.filename or dest.name, doc_type=doc_type)
+    job = job_registry.create_job(
+        filename=file.filename or dest.name, doc_type=doc_type, model=describe_extraction_model(doc_type)
+    )
     background_tasks.add_task(_run_ingest_job, job.id, dest, doc_type)
     return {"job_id": job.id, "status": job.status}
 
@@ -86,6 +89,17 @@ def _run_ingest_job(job_id: str, path: Path, doc_type: DocType) -> None:
         job_registry.update_job(job_id, status=job_registry.JobStatus.cancelled, doc_id=None)
     except Exception as exc:
         job_registry.update_job(job_id, status=job_registry.JobStatus.failed, error=str(exc))
+
+
+@router.get("/models")
+async def models_endpoint() -> dict:
+    """Which LLM ingestion uses for each document type, and which one chat
+    uses, for the status bar on the ingest page."""
+    settings = get_settings()
+    return {
+        "ingest": {doc_type: describe_extraction_model(doc_type) for doc_type in ("textbook", "patient_record")},
+        "chat": {"provider": "ollama", "model": settings.ollama_model},
+    }
 
 
 @router.get("/jobs")

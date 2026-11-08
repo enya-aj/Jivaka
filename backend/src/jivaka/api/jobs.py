@@ -24,6 +24,9 @@ class Job:
     id: str
     filename: str = ""
     doc_type: str = ""
+    # The LLM extracting this document, as {"provider", "model"}, fixed when
+    # the job is created (settings only change on a backend restart).
+    model: Optional[dict] = None
     status: JobStatus = JobStatus.queued
     progress: str = ""
     # Set once the pipeline has written the Document node, so the page can
@@ -40,6 +43,7 @@ class Job:
             "id": self.id,
             "filename": self.filename,
             "doc_type": self.doc_type,
+            "model": self.model,
             "status": self.status,
             "progress": self.progress,
             "doc_id": self.doc_id,
@@ -62,8 +66,8 @@ _lock = threading.Lock()
 FINISHED_JOB_TTL_SECONDS = 24 * 3600
 
 
-def create_job(filename: str = "", doc_type: str = "") -> Job:
-    job = Job(id=str(uuid.uuid4()), filename=filename, doc_type=doc_type)
+def create_job(filename: str = "", doc_type: str = "", model: Optional[dict] = None) -> Job:
+    job = Job(id=str(uuid.uuid4()), filename=filename, doc_type=doc_type, model=model)
     with _lock:
         _jobs[job.id] = job
     return job
