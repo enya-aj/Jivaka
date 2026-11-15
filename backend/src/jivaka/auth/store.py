@@ -3,7 +3,9 @@ uploads (APP_DB_PATH). The knowledge graph stays in FalkorDB; this is only
 the application's own bookkeeping."""
 
 import hashlib
+import json
 import secrets
+import uuid
 import sqlite3
 import threading
 import time
@@ -32,7 +34,27 @@ CREATE TABLE IF NOT EXISTS sessions (
     expires_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS sessions_email ON sessions(email);
+CREATE TABLE IF NOT EXISTS conversations (
+    id TEXT PRIMARY KEY,
+    user_email TEXT NOT NULL,
+    title TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS conversations_user ON conversations(user_email, updated_at);
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    sources TEXT NOT NULL DEFAULT '[]',
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chat_messages_conversation ON chat_messages(conversation_id, id);
 """
+
+# Conversation titles are the first question, cut to this many characters.
+TITLE_MAX_CHARS = 80
 
 
 @dataclass
@@ -185,6 +207,115 @@ class AppStore:
     def delete_session(self, token: str) -> None:
         with self.tx() as db:
             db.execute("DELETE FROM sessions WHERE token_hash = ?", (_hash_token(token),))
+
+
+@dataclass
+class Conversation:
+    id: str
+    user_email: str
+    title: str
+    created_at: float
+    updated_at: float
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def _row_to_conversation(row: sqlite3.Row) -> Conversation:
+    return Conversation(
+        id=row["id"],
+        user_email=row["user_email"],
+        title=row["title"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _title_from(question: str) -> str:
+    title = " ".join(question.split())
+    return title if len(title) <= TITLE_MAX_CHARS else title[: TITLE_MAX_CHARS - 1].rstrip() + "…"
+
+
+class ChatHistory:
+    """Saved chat conversations. Each belongs to the user who started it."""
+
+    def __init__(self, store: AppStore):
+        self.store = store
+
+    def create(self, user_email: str, first_question: str) -> Conversation:
+        now = time.time()
+        conversation = Conversation(
+            id=str(uuid.uuid4()),
+            user_email=user_email.lower(),
+            title=_title_from(first_question) or "New chat",
+            created_at=now,
+            updated_at=now,
+        )
+        with self.store.tx() as db:
+            db.execute(
+                "INSERT INTO conversations (id, user_email, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (conversation.id, conversation.user_email, conversation.title, now, now),
+            )
+        return conversation
+
+    def get(self, conversation_id: str) -> Optional[Conversation]:
+        with self.store.tx() as db:
+            row = db.execute("SELECT * FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
+        return _row_to_conversation(row) if row else None
+
+    def list_for(self, user_email: Optional[str] = None, limit: int = 200) -> list[Conversation]:
+        """One user's conversations, or everyone's when user_email is None,
+        most recently active first."""
+        with self.store.tx() as db:
+            if user_email is None:
+                rows = db.execute(
+                    "SELECT * FROM conversations ORDER BY updated_at DESC LIMIT ?", (limit,)
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT * FROM conversations WHERE user_email = ? ORDER BY updated_at DESC LIMIT ?",
+                    (user_email.lower(), limit),
+                ).fetchall()
+        return [_row_to_conversation(r) for r in rows]
+
+    def messages(self, conversation_id: str) -> list[dict]:
+        with self.store.tx() as db:
+            rows = db.execute(
+                "SELECT role, content, sources, created_at FROM chat_messages WHERE conversation_id = ? ORDER BY id",
+                (conversation_id,),
+            ).fetchall()
+        return [
+            {
+                "role": r["role"],
+                "content": r["content"],
+                "sources": json.loads(r["sources"]),
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ]
+
+    def add_exchange(self, conversation_id: str, question: str, answer: str, sources: list) -> None:
+        """Saves a question with its answer, together, once the answer is done."""
+        now = time.time()
+        with self.store.tx() as db:
+            db.executemany(
+                "INSERT INTO chat_messages (conversation_id, role, content, sources, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [
+                    (conversation_id, "user", question, "[]", now),
+                    (conversation_id, "assistant", answer, json.dumps(sources, ensure_ascii=False), now),
+                ],
+            )
+            db.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conversation_id))
+
+    def rename(self, conversation_id: str, title: str) -> None:
+        with self.store.tx() as db:
+            db.execute("UPDATE conversations SET title = ? WHERE id = ?", (_title_from(title), conversation_id))
+
+    def delete(self, conversation_id: str) -> None:
+        with self.store.tx() as db:
+            db.execute("DELETE FROM chat_messages WHERE conversation_id = ?", (conversation_id,))
+            db.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
 
 
 _store: Optional[AppStore] = None
