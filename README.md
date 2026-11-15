@@ -48,4 +48,4 @@ See [docs/user-manual.md](docs/user-manual.md) for detailed setup and usage inst
 
 Ingestion, de-identification, and a v1 chat page with entity-based retrieval and cited answers. Next: full-text and embedding search for questions that don't name a known entity.
 
-**Security:** the backend has no login. With chat, anyone who can reach port 8000 can read de-identified patient records in plain language (and the ingestion API still serves filenames and graphs). Before any deployment beyond a private test host: put a login in front of the whole backend, bind it to localhost behind a TLS reverse proxy, restrict patient documents per user, and log chat questions with the chunks they were shown.
+**Security:** every page and API call needs a Google sign-in by an invited user, with admin, doctor and student roles (students never see patient data), and chat history is kept for audits; see §12 of the [user manual](docs/user-manual.md). Serve it over HTTPS (the `https` compose profile) with `BACKEND_BIND_ADDRESS=127.0.0.1`, so the API isn't reachable over plain http. Patient documents are not yet restricted per doctor: every doctor can read every de-identified record.

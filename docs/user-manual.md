@@ -186,7 +186,7 @@ curl -X DELETE http://localhost:8000/documents/<doc_id>
 
 This only deletes interrupted documents (409 for finished ones, or while an ingest is still writing it; cancel that job instead).
 
-There is no authentication on this API — it's for local verification only, not production/public exposure.
+Every API call needs a signed-in session (the `jivaka_session` cookie the sign-in page sets), except `GET /health`; see §12. For quick local testing with `curl`, set `AUTH_ENABLED=false`.
 
 ## 7. Asking questions (chat)
 
@@ -197,7 +197,9 @@ Open [http://localhost:8000/chat](http://localhost:8000/chat) (also linked from 
 3. The same Ollama model as ingestion (`OLLAMA_MODEL`) writes the answer from those sources only, citing them as `[1]`, `[2]`, and streams it to the page. Click a citation or a source to see the passage, its entities and definitions.
 4. If nothing matches, the page says so instead of letting the model answer from memory.
 
-To ask about one patient, put their pseudonym in the question, e.g. "What was P-0001 given for pneumonia?". Follow-up questions in the same tab reuse the previous patient and terms. The conversation lives only in the browser tab; reloading or "New chat" clears it.
+To ask about one patient, put their pseudonym in the question, e.g. "What was P-0001 given for pneumonia?". Follow-up questions in the same conversation reuse the previous patient and terms.
+
+Conversations are saved per user and listed in the sidebar (rename with ✎, delete with ✕). Admins can tick **Everyone's chats** to read anyone's conversations for audits; they can't add to or rename someone else's. Students' answers come from textbooks only, never patient records or transcripts.
 
 Chat and ingestion share one Ollama model, so while a document is ingesting, an answer waits for the model ("Writing answer…" stays up longer).
 
@@ -205,7 +207,8 @@ From the CLI, the same pipeline: `docker compose exec backend jivaka ask "How is
 
 The HTTP API behind the page:
 
-- `POST /chat` with `{"messages": [{"role": "user", "content": "..."}]}` (the whole conversation so far, ending with the new question) returns Server-Sent Events: `status` (`searching`, `writing`), `sources` (the numbered chunks), `token` (answer text, many), `done`, or `error`.
+- `POST /chat` with `{"question": "...", "conversation_id": "..."}` (leave out `conversation_id` to start a new conversation) returns Server-Sent Events: `conversation` (its `id` and `title`), `status` (`searching`, `writing`), `sources` (the numbered chunks), `token` (answer text, many), `done`, or `error`. The question and answer are saved once the answer is complete; the server supplies the earlier messages.
+- `GET /conversations` (admins: `?everyone=true`), `GET /conversations/{id}` (with its messages and sources), `PATCH /conversations/{id}` `{"title": "..."}`, `DELETE /conversations/{id}`.
 - `GET /chunks/{chunk_id}` returns one source chunk with its document label, entities and definitions.
 
 ## 8. Patient record de-identification
@@ -237,10 +240,11 @@ Patient `Document` nodes also carry a `pseudonym`, and their `Chunk` nodes `deid
 - Entity extraction quality depends entirely on the Ollama model you choose and its prompt-following ability — there's no dedicated clinical NER model in this version.
 - One document ingests at a time per request, and each runs its own background job — there's no batch/queue-based ingestion of many documents at once, and job status is in-memory only (lost on a backend restart).
 - `.mobi` parsing quality varies by file — the unpacking library's output isn't perfectly uniform across older MOBI vs. newer hybrid (KF8/AZW3) files; treat it as best-effort until tested against real files.
-- Re-uploading the same file (same content hash and `doc_type`) doesn't create a second `Document`: the job succeeds with `"duplicate": true` and returns the existing document. A leftover from an earlier failed run of the same file is replaced. Duplicates already in the graph from before this check existed aren't cleaned up automatically.
+- Re-uploading the same file, or the same text under another name or format (same `doc_type`), doesn't create a second `Document`: the job succeeds with `"duplicate": true` and returns the existing document (see §13). A leftover from an earlier failed run of the same file is replaced. Duplicates already in the graph from before these checks existed aren't cleaned up automatically.
 - Chat retrieval only matches entity names the extractor produced (plus their definitions and one relation hop); questions phrased with words that never became entities find nothing. Full-text and embedding search are planned next.
 - Each patient document gets its own pseudonym: two documents about the same person are two pseudonyms.
-- There is no login. Chat makes de-identified patient records readable to anyone who can reach the backend - see the security note in the README before exposing it.
+- Ingest jobs (including uploads waiting for a near-duplicate decision) are in memory and lost on a backend restart.
+- A transcript and a patient record about the same person get different pseudonyms; nothing links them.
 
 ## 11. Troubleshooting
 
@@ -249,3 +253,50 @@ Patient `Document` nodes also carry a `pseudonym`, and their `Chunk` nodes `deid
 - **Ingesting a patient record fails with `Corpus 'thainer-1.4' not found` or `Can't find model 'en_core_web_sm'`:** the NER models are installed when the backend image is built; rebuild it (`docker compose build backend`). Outside Docker, run `python -c "from pythainlp.corpus import download; download('thainer-1.4', url='https://raw.githubusercontent.com/PyThaiNLP/pythainlp-corpus/master/db.json')"`.
 - **Chat says it found nothing:** the question's terms must match entity names in the graph. Try the term as the documents write it (e.g. "type 2 diabetes mellitus"), and check the documents were ingested after an Ollama model was available (0 entities per chunk means extraction failed).
 - **FalkorDB browser UI shows an empty graph:** confirm you're viewing the graph named in `FALKOR_GRAPH_NAME` (default `jivaka`), not a different/default graph.
+
+## 12. Sign-in and roles
+
+Every page and API call needs a signed-in Google account that an admin has invited. Users, sign-in sessions and chat history are kept in a SQLite file, `data/app/jivaka.db` on the host.
+
+| Role | Can do |
+| --- | --- |
+| Admin | Everything a doctor can, plus inviting people and changing roles on `/admin`, reading everyone's chat history, and deleting any document. |
+| Doctor | Uploads documents, deletes and cancels their own uploads, writes transcript summaries, chats with answers from textbooks, patient records and transcripts. |
+| Student | Chats with answers from textbooks only. Never sees patient records or transcripts, not even their filenames, and is sent to the chat page. |
+
+Each document records who uploaded it (`ingested_by`, `ingested_by_name`), shown as "by …" in Recent documents. Documents ingested before sign-in existed show as uploaded by the admin, and only admins can delete them.
+
+**Setting it up**
+
+1. **A web address with HTTPS.** Google refuses plain-http sign-in except on `localhost`. Without a domain, [sslip.io](https://sslip.io) gives a server's IP a free name: `187-127-210-88.sslip.io` points at `187.127.210.88`. In `.env`:
+   ```
+   COMPOSE_PROFILES=https            # plus ollama-managed if you use the bundled Ollama
+   SITE_ADDRESS=187-127-210-88.sslip.io
+   PUBLIC_BASE_URL=https://187-127-210-88.sslip.io
+   BACKEND_BIND_ADDRESS=127.0.0.1    # API reachable only through HTTPS
+   ```
+   The `caddy` service then gets a Let's Encrypt certificate by itself. Ports 80 and 443 must be open to the internet.
+2. **A Google OAuth client.** In [Google Cloud Console](https://console.cloud.google.com/apis/credentials): create a project, set up the OAuth consent screen (External, app name "Jivaka", your email; while it's in Testing, add each user under *Test users*, or publish it), then *Create credentials → OAuth client ID → Web application*, with authorized redirect URI `https://187-127-210-88.sslip.io/auth/callback`. Put the client ID and secret in `.env` as `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`.
+3. **The first admin.** Set `ADMIN_EMAILS=you@gmail.com` (comma-separated for several). Those addresses can always sign in as admins; everyone else is invited on `/admin`.
+4. `docker compose up -d --build`.
+
+For local development without Google, set `AUTH_ENABLED=false` and `COOKIE_SECURE=false`: everyone is then an admin called "Developer (sign-in off)".
+
+API: `GET /me`, `GET/POST /admin/users`, `PATCH/DELETE /admin/users/{email}` (admins only), `POST /auth/logout`.
+
+## 13. Duplicate content
+
+Besides the file-hash check, the extracted text (after OCR) is fingerprinted, so the same book under another filename or format is caught:
+
+- **Same text** (ignoring case, spacing and punctuation): not ingested again. The job succeeds with `"duplicate": true`, `"duplicate_reason": "same_content"`, and the page says who uploaded the original and when.
+- **Very similar text** (an estimated 90% or more of 5-word phrases shared, e.g. another scan or a revised edition): the upload waits with status `needs_confirmation`, listing the similar documents with uploader and date. **Ingest anyway** (`POST /jobs/{id}/confirm`) or **Cancel** (deletes the upload). Uploads still waiting after a day are dropped.
+
+Only documents of the same type are compared. Documents ingested before this existed have no fingerprint; run `docker compose exec backend jivaka fingerprint-backfill` once to fingerprint them from their uploaded files.
+
+## 14. Patient conversation transcripts
+
+Pick **patient conversation transcript** (`doc_type=patient_transcript`) for a text file of a clinician-patient conversation, in Thai, English or both, ideally one speaker turn per line (`Doctor: …`, `ผู้ป่วย: …`). Transcripts are handled like patient records: de-identified before chunking (§8), given a pseudonym, extracted on local Ollama only, and hidden from students. Chunks never split a speaker turn.
+
+After ingesting, the local Ollama model writes a **SOAP note** (Subjective, Objective, Assessment, Plan) and a short plain-language summary from the de-identified transcript, in the conversation's main language. Long transcripts are summarized part by part first. The summary appears above the result on the ingest page; **Write again** redoes it (for example after changing `OLLAMA_MODEL`). It is a draft: check it against the conversation.
+
+API: `GET /documents/{id}/summary` (`status` none/running/done/failed, `summary`), `POST /documents/{id}/summary` to write it again. CLI: `docker compose exec backend jivaka summarize <doc_id>`.
