@@ -2,10 +2,12 @@ import json
 import logging
 from typing import Iterator, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
+from jivaka.auth.deps import current_user
+from jivaka.auth.store import User
 from jivaka.chat.service import ChatEvent, ChatService
 from jivaka.config import get_settings
 from jivaka.db.falkor_client import get_graph
@@ -35,11 +37,13 @@ class ChatRequest(BaseModel):
 
 
 @router.post("/chat")
-def chat_endpoint(request: ChatRequest) -> StreamingResponse:
+def chat_endpoint(request: ChatRequest, user: User = Depends(current_user)) -> StreamingResponse:
     """Answers the last question as Server-Sent Events: `status`
     (searching/writing), `sources` (the numbered chunks the answer may cite),
     `token` (answer text, streamed), then `done` - or `error`."""
-    service = ChatService(get_graph(), top_k=get_settings().retrieval_top_k)
+    service = ChatService(
+        get_graph(), top_k=get_settings().retrieval_top_k, include_patients=user.can_see_patient_records
+    )
     events = service.answer([m.model_dump() for m in request.messages])
     return StreamingResponse(
         _sse(events),
@@ -60,10 +64,10 @@ def _sse(events: Iterator[ChatEvent]) -> Iterator[str]:
 
 
 @router.get("/chunks/{chunk_id}")
-def get_chunk_endpoint(chunk_id: str) -> dict:
+def get_chunk_endpoint(chunk_id: str, user: User = Depends(current_user)) -> dict:
     """One source chunk with its document label, entities and definitions,
     for the chat page's citation panel."""
-    chunks = load_chunks(get_graph(), [chunk_id])
+    chunks = load_chunks(get_graph(), [chunk_id], include_patients=user.can_see_patient_records)
     if not chunks:
         raise HTTPException(status_code=404, detail="Chunk not found")
     return chunks[0].to_dict()

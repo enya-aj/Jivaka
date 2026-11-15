@@ -38,7 +38,7 @@ def test_chat_rejects_a_conversation_not_ending_in_a_question():
 
 def test_chunk_not_found(monkeypatch):
     monkeypatch.setattr(chat_routes, "get_graph", lambda: None)
-    monkeypatch.setattr(chat_routes, "load_chunks", lambda graph, ids: [])
+    monkeypatch.setattr(chat_routes, "load_chunks", lambda graph, ids, include_patients=True: [])
 
     assert TestClient(app).get("/chunks/nope").status_code == 404
 

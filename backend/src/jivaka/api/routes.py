@@ -2,9 +2,11 @@ import shutil
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 
 from jivaka.api import jobs as job_registry
+from jivaka.auth.deps import current_user, ingest_user
+from jivaka.auth.store import User
 from jivaka.config import get_settings
 from jivaka.db.falkor_client import get_graph
 from jivaka.db.graph_reader import get_document_graph, list_documents
@@ -17,11 +19,17 @@ from jivaka.ingestion.pipeline import IngestionCancelled, ingest_document
 router = APIRouter()
 
 
+def _may_see(user: User, doc_type: object) -> bool:
+    """Students never see patient records, not even their filenames."""
+    return user.can_see_patient_records or doc_type != "patient_record"
+
+
 @router.post("/ingest")
 async def ingest_endpoint(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     doc_type: DocType = Form(...),
+    user: User = Depends(ingest_user),
 ) -> dict:
     """Saves the upload and kicks off ingestion as a background job rather
     than blocking the request - ingestion can take minutes (LLM calls per
@@ -92,7 +100,7 @@ def _run_ingest_job(job_id: str, path: Path, doc_type: DocType) -> None:
 
 
 @router.get("/models")
-async def models_endpoint() -> dict:
+async def models_endpoint(_: User = Depends(current_user)) -> dict:
     """Which LLM ingestion uses for each document type, and which one chat
     uses, for the status bar on the ingest page."""
     settings = get_settings()
@@ -103,21 +111,21 @@ async def models_endpoint() -> dict:
 
 
 @router.get("/jobs")
-async def list_jobs_endpoint() -> list[dict]:
+async def list_jobs_endpoint(user: User = Depends(current_user)) -> list[dict]:
     """Running ingests plus ones that finished in the last day, newest first."""
-    return [job.to_dict() for job in job_registry.list_jobs()]
+    return [job.to_dict() for job in job_registry.list_jobs() if _may_see(user, job.doc_type)]
 
 
 @router.get("/jobs/{job_id}")
-async def get_job_endpoint(job_id: str) -> dict:
+async def get_job_endpoint(job_id: str, user: User = Depends(current_user)) -> dict:
     job = job_registry.get_job(job_id)
-    if job is None:
+    if job is None or not _may_see(user, job.doc_type):
         raise HTTPException(status_code=404, detail="Job not found")
     return job.to_dict()
 
 
 @router.post("/jobs/{job_id}/cancel")
-async def cancel_job_endpoint(job_id: str) -> dict:
+async def cancel_job_endpoint(job_id: str, _: User = Depends(ingest_user)) -> dict:
     job = job_registry.request_cancel(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -125,7 +133,7 @@ async def cancel_job_endpoint(job_id: str) -> dict:
 
 
 @router.delete("/jobs/{job_id}")
-async def dismiss_job_endpoint(job_id: str) -> dict:
+async def dismiss_job_endpoint(job_id: str, _: User = Depends(ingest_user)) -> dict:
     """Removes a cancelled, failed or finished job from Recent documents.
     Its document, if any, is untouched."""
     job = job_registry.dismiss_job(job_id)
@@ -137,9 +145,9 @@ async def dismiss_job_endpoint(job_id: str) -> dict:
 
 
 @router.get("/documents")
-async def list_documents_endpoint(limit: int = 50) -> list[dict]:
+async def list_documents_endpoint(limit: int = 50, user: User = Depends(current_user)) -> list[dict]:
     graph = get_graph()
-    docs = list_documents(graph, limit=limit)
+    docs = [d for d in list_documents(graph, limit=limit) if _may_see(user, d.get("doc_type"))]
     for doc in docs:
         # ingestion_complete is false while a run is in progress or after one
         # was interrupted; documents older than that flag don't carry it.
@@ -148,7 +156,7 @@ async def list_documents_endpoint(limit: int = 50) -> list[dict]:
 
 
 @router.delete("/documents/{doc_id}")
-async def delete_document_endpoint(doc_id: str) -> dict:
+async def delete_document_endpoint(doc_id: str, _: User = Depends(ingest_user)) -> dict:
     """Deletes a document (finished or interrupted) with its chunks and
     entities, plus its uploaded file. Shared Definition nodes stay. A
     document an ingest is still writing can't be deleted; cancel it instead."""
@@ -167,9 +175,9 @@ async def delete_document_endpoint(doc_id: str) -> dict:
 
 
 @router.get("/documents/{doc_id}/graph")
-async def get_graph_endpoint(doc_id: str) -> dict:
+async def get_graph_endpoint(doc_id: str, user: User = Depends(current_user)) -> dict:
     graph = get_graph()
     dump = get_document_graph(graph, doc_id)
-    if dump is None:
+    if dump is None or not _may_see(user, dump.get("document", {}).get("doc_type")):
         raise HTTPException(status_code=404, detail="Document not found")
     return dump

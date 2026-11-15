@@ -4,6 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Jivaka — Chat</title>
+<script src="/auth.js"></script>
 <style>
   :root {
     color-scheme: light dark;
@@ -170,9 +171,10 @@
   <div class="main">
     <header>
       <h1>Jivaka</h1>
-      <nav><a href="/">Ingest documents</a><span>Chat</span></nav>
+      <nav><a href="/" data-needs-ingest>Ingest documents</a><span>Chat</span></nav>
       <span class="spacer"></span>
       <button class="link" id="new-chat" type="button">New chat</button>
+      <div id="userbar"></div>
       <p class="notice">Answers come only from ingested textbooks and anonymized patient records, and are not clinical advice. Patients are named by pseudonym, e.g. P-0001.</p>
     </header>
 

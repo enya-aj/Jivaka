@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <title>Jivaka — Ingestion</title>
+<script src="/auth.js"></script>
 <style>
   :root {
     color-scheme: light dark;
@@ -161,7 +162,10 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>Jivaka</h1>
+  <div style="display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap;">
+    <h1 style="margin-right: auto;">Jivaka</h1>
+    <div id="userbar"></div>
+  </div>
   <p class="subtitle">Upload a document to build its portion of the trinity knowledge graph. · <a href="/chat" style="color: var(--accent);">Ask questions in chat</a></p>
 
   <div class="model-bar" id="model-bar" role="status" aria-live="polite">Loading models…</div>

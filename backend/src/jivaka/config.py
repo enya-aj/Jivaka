@@ -71,6 +71,30 @@ class Settings(BaseSettings):
     # Chat: how many chunks are given to the model as sources per answer.
     retrieval_top_k: int = 6
 
+    # Sign-in (jivaka.auth). With auth on, every page and API call needs a
+    # signed-in, invited user. Only turn it off for local development and
+    # tests: everyone is then treated as an admin.
+    auth_enabled: bool = True
+    # OAuth client from Google Cloud Console (APIs & Services > Credentials,
+    # type "Web application"). Its authorized redirect URI must be
+    # PUBLIC_BASE_URL + "/auth/callback".
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    # The address people open Jivaka at, e.g. https://187-127-210-88.sslip.io
+    public_base_url: str = "http://localhost:8000"
+    # Comma-separated Google addresses that are always admins. They can sign
+    # in without an invite and add everyone else on the /admin page.
+    admin_emails: str = ""
+    # Users, sign-in sessions and chat history live in this SQLite file.
+    app_db_path: str = "./data/app/jivaka.db"
+    session_days: int = 14
+    # Session cookies only travel over HTTPS. Turn off for plain-http local
+    # development, or the browser drops the cookie and sign-in loops.
+    cookie_secure: bool = True
+
+    def admin_email_set(self) -> set[str]:
+        return {e.strip().lower() for e in self.admin_emails.split(",") if e.strip()}
+
 
 @lru_cache
 def get_settings() -> Settings:
