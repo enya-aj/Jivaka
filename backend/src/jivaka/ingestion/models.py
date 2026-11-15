@@ -24,6 +24,13 @@ class Document(BaseModel):
     source_hash: str
     ocr_used: bool = False
     ingested_at: datetime = Field(default_factory=utcnow)
+    # Who uploaded it (Google account email and name). Empty on documents
+    # from before sign-in existed, which count as the admin's.
+    ingested_by: str = ""
+    ingested_by_name: str = ""
+    # Hash of the normalized extracted text (see ingestion/fingerprint.py),
+    # so the same text under another filename is caught as a duplicate.
+    content_hash: str = ""
 
 
 class Chunk(BaseModel):
@@ -97,3 +104,6 @@ class IngestionResult(BaseModel):
     # Chunks whose text repeated an earlier chunk in the same run, so its
     # extraction was reused instead of calling the LLM again.
     reused_extractions: int = 0
+    # Set when the text matched a document ingested from a different file
+    # (same content, other filename/format) rather than the same file.
+    duplicate_reason: str = ""

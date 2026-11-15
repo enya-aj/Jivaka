@@ -23,6 +23,9 @@ class GraphWriter:
                 d.source_hash = $source_hash,
                 d.ocr_used = $ocr_used,
                 d.ingested_at = $ingested_at,
+                d.ingested_by = $ingested_by,
+                d.ingested_by_name = $ingested_by_name,
+                d.content_hash = $content_hash,
                 d.ingestion_complete = false
             """,
             params={
@@ -32,7 +35,16 @@ class GraphWriter:
                 "source_hash": document.source_hash,
                 "ocr_used": document.ocr_used,
                 "ingested_at": document.ingested_at.isoformat(),
+                "ingested_by": document.ingested_by,
+                "ingested_by_name": document.ingested_by_name,
+                "content_hash": document.content_hash,
             },
+        )
+
+    def set_fingerprint(self, doc_id: str, content_hash: str, signature: list[int]) -> None:
+        self.graph.query(
+            "MATCH (d:Document {id: $id}) SET d.content_hash = $content_hash, d.content_signature = $signature",
+            params={"id": doc_id, "content_hash": content_hash, "signature": signature},
         )
 
     def assign_pseudonym(self, doc_id: str) -> str:

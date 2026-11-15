@@ -14,7 +14,7 @@ from jivaka.ingestion.extraction.llm_client import describe_extraction_model
 from jivaka.ingestion.graph_writer import GraphWriter
 from jivaka.ingestion.intake import SUPPORTED_EXTENSIONS
 from jivaka.ingestion.models import DocType
-from jivaka.ingestion.pipeline import IngestionCancelled, ingest_document
+from jivaka.ingestion.pipeline import IngestionCancelled, NearDuplicateFound, ingest_document
 
 router = APIRouter()
 
@@ -50,13 +50,24 @@ async def ingest_endpoint(
         shutil.copyfileobj(file.file, f)
 
     job = job_registry.create_job(
-        filename=file.filename or dest.name, doc_type=doc_type, model=describe_extraction_model(doc_type)
+        filename=file.filename or dest.name,
+        doc_type=doc_type,
+        model=describe_extraction_model(doc_type),
+        uploaded_by=user.email,
+        uploaded_by_name=user.name,
+        path=str(dest),
     )
     background_tasks.add_task(_run_ingest_job, job.id, dest, doc_type)
     return {"job_id": job.id, "status": job.status}
 
 
-def _run_ingest_job(job_id: str, path: Path, doc_type: DocType) -> None:
+def _may_manage(user: User, owner_email: str) -> bool:
+    """Doctors manage their own uploads; admins manage everyone's. Documents
+    from before sign-in count as the admin's."""
+    return user.is_admin or (bool(owner_email) and owner_email == user.email)
+
+
+def _run_ingest_job(job_id: str, path: Path, doc_type: DocType, allow_near_duplicate: bool = False) -> None:
     # Runs in FastAPI's threadpool (BackgroundTasks runs sync callables off
     # the event loop), so the blocking ingest_document call here doesn't
     # stall other requests.
@@ -84,7 +95,13 @@ def _run_ingest_job(job_id: str, path: Path, doc_type: DocType) -> None:
     try:
         graph = get_graph()
         result = ingest_document(
-            path=path, doc_type=doc_type, graph=graph, on_progress=on_progress, on_document=on_document
+            path=path,
+            doc_type=doc_type,
+            graph=graph,
+            on_progress=on_progress,
+            on_document=on_document,
+            uploaded_by=(job.uploaded_by, job.uploaded_by_name),
+            allow_near_duplicate=allow_near_duplicate,
         )
         if result.duplicate:
             # Already ingested from an identical file, so this copy isn't needed.
@@ -95,6 +112,11 @@ def _run_ingest_job(job_id: str, path: Path, doc_type: DocType) -> None:
     except IngestionCancelled:
         path.unlink(missing_ok=True)
         job_registry.update_job(job_id, status=job_registry.JobStatus.cancelled, doc_id=None)
+    except NearDuplicateFound as exc:
+        # Keep the upload until the uploader decides.
+        job_registry.update_job(
+            job_id, status=job_registry.JobStatus.needs_confirmation, similar=exc.matches, progress=""
+        )
     except Exception as exc:
         job_registry.update_job(job_id, status=job_registry.JobStatus.failed, error=str(exc))
 
@@ -125,20 +147,57 @@ async def get_job_endpoint(job_id: str, user: User = Depends(current_user)) -> d
 
 
 @router.post("/jobs/{job_id}/cancel")
-async def cancel_job_endpoint(job_id: str, _: User = Depends(ingest_user)) -> dict:
-    job = job_registry.request_cancel(job_id)
+async def cancel_job_endpoint(job_id: str, user: User = Depends(ingest_user)) -> dict:
+    job = job_registry.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
+    if not _may_manage(user, job.uploaded_by):
+        raise HTTPException(status_code=403, detail="Only the uploader or an admin can cancel this ingest.")
+    if job.status == job_registry.JobStatus.needs_confirmation:
+        _discard_upload(job)
+        job_registry.update_job(job_id, status=job_registry.JobStatus.cancelled)
+        return job.to_dict()
+    job_registry.request_cancel(job_id)
     return job.to_dict()
 
 
+@router.post("/jobs/{job_id}/confirm")
+async def confirm_job_endpoint(
+    job_id: str, background_tasks: BackgroundTasks, user: User = Depends(ingest_user)
+) -> dict:
+    """Ingests an upload that was held back as very similar to an existing
+    document, after the uploader chose "ingest anyway"."""
+    job = job_registry.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not _may_manage(user, job.uploaded_by):
+        raise HTTPException(status_code=403, detail="Only the uploader or an admin can decide this.")
+    if job.status != job_registry.JobStatus.needs_confirmation or not job.path:
+        raise HTTPException(status_code=409, detail="This upload isn't waiting for a decision.")
+    job_registry.update_job(job_id, status=job_registry.JobStatus.queued, similar=[], progress="")
+    background_tasks.add_task(_run_ingest_job, job.id, Path(job.path), job.doc_type, True)
+    return job.to_dict()
+
+
+def _discard_upload(job: job_registry.Job) -> None:
+    if job.path:
+        Path(job.path).unlink(missing_ok=True)
+
+
 @router.delete("/jobs/{job_id}")
-async def dismiss_job_endpoint(job_id: str, _: User = Depends(ingest_user)) -> dict:
+async def dismiss_job_endpoint(job_id: str, user: User = Depends(ingest_user)) -> dict:
     """Removes a cancelled, failed or finished job from Recent documents.
     Its document, if any, is untouched."""
+    existing = job_registry.get_job(job_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not _may_manage(user, existing.uploaded_by):
+        raise HTTPException(status_code=403, detail="Only the uploader or an admin can remove this.")
     job = job_registry.dismiss_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
+    if job.status == job_registry.JobStatus.needs_confirmation:
+        _discard_upload(job)
     if job.status in job_registry.ACTIVE_STATUSES:
         raise HTTPException(status_code=409, detail="This ingest is still running. Cancel it first.")
     return {"dismissed": job_id}
@@ -156,16 +215,20 @@ async def list_documents_endpoint(limit: int = 50, user: User = Depends(current_
 
 
 @router.delete("/documents/{doc_id}")
-async def delete_document_endpoint(doc_id: str, _: User = Depends(ingest_user)) -> dict:
+async def delete_document_endpoint(doc_id: str, user: User = Depends(ingest_user)) -> dict:
     """Deletes a document (finished or interrupted) with its chunks and
     entities, plus its uploaded file. Shared Definition nodes stay. A
     document an ingest is still writing can't be deleted; cancel it instead."""
     if any(job.doc_id == doc_id for job in job_registry.list_jobs() if job.status in job_registry.ACTIVE_STATUSES):
         raise HTTPException(status_code=409, detail="This document is still being ingested. Cancel the ingest instead.")
     graph = get_graph()
-    rows = graph.query("MATCH (d:Document {id: $id}) RETURN d.filename", params={"id": doc_id}).result_set
+    rows = graph.query(
+        "MATCH (d:Document {id: $id}) RETURN d.filename, d.ingested_by", params={"id": doc_id}
+    ).result_set
     if not rows:
         raise HTTPException(status_code=404, detail="Document not found")
+    if not _may_manage(user, rows[0][1] or ""):
+        raise HTTPException(status_code=403, detail="Only the uploader or an admin can delete this document.")
     GraphWriter(graph).delete_document(doc_id)
     filename = rows[0][0]
     if filename:

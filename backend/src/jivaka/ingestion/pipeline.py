@@ -12,13 +12,20 @@ from typing import Callable, Optional
 from falkordb import Graph
 
 from jivaka.config import Settings, get_settings
-from jivaka.db.graph_reader import find_documents_by_hash, get_document_graph
+from jivaka.db.graph_reader import (
+    LEGACY_UPLOADER,
+    document_signatures,
+    find_documents_by_content_hash,
+    find_documents_by_hash,
+    get_document_graph,
+)
 from jivaka.db.schema import ensure_schema
 from jivaka.deid import Deidentifier, build_deidentifier
 from jivaka.ingestion.chunking.selector import get_chunker
 from jivaka.ingestion.extraction.base import EntityExtractor
 from jivaka.ingestion.extraction.llm_client import OpenRouterClient, build_extraction_client
 from jivaka.ingestion.extraction.llm_extractor import LLMEntityExtractor
+from jivaka.ingestion.fingerprint import NEAR_DUPLICATE_THRESHOLD, Fingerprint, fingerprint, similarity
 from jivaka.ingestion.graph_writer import GraphWriter
 from jivaka.ingestion.intake import LoadedDocument, load_document
 from jivaka.ingestion.linking.base import DefinitionSource
@@ -67,6 +74,16 @@ class IngestionCancelled(Exception):
     The pipeline deletes the partly written document before re-raising."""
 
 
+class NearDuplicateFound(Exception):
+    """The text is very similar to documents already ingested (another scan
+    or edition of the same book, say). Nothing was written. Ingest again
+    with allow_near_duplicate=True to go ahead anyway."""
+
+    def __init__(self, matches: list[dict]):
+        super().__init__(f"Very similar to {len(matches)} document(s) already ingested")
+        self.matches = matches
+
+
 def ingest_document(
     path: Path,
     doc_type: DocType,
@@ -76,13 +93,20 @@ def ingest_document(
     on_progress: Optional[Callable[[int, int], None]] = None,
     deidentifier: Optional[Deidentifier] = None,
     on_document: Optional[Callable[[str], None]] = None,
+    uploaded_by: tuple[str, str] = ("", ""),
+    allow_near_duplicate: bool = False,
 ) -> IngestionResult:
     """Orchestrates intake -> OCR fallback -> chunking -> entity extraction
     -> definition linking -> graph write for a single document.
 
     on_document(doc_id) is called once the Document node is written, and
     on_progress(done, total) after each chunk (with done=0 once chunking is
-    finished). Either may raise IngestionCancelled to stop the run."""
+    finished). Either may raise IngestionCancelled to stop the run.
+
+    uploaded_by is the uploader's (email, name), stored on the document.
+    Text identical to an already ingested document (whatever its filename)
+    returns that document as a duplicate. Text that is merely very similar
+    raises NearDuplicateFound unless allow_near_duplicate is set."""
     start = time.monotonic()
     settings = get_settings()
     provider, max_concurrency = "ollama", settings.ingest_max_concurrency
@@ -117,6 +141,8 @@ def ingest_document(
             on_document,
             resume_from=interrupted,
             llm=(provider, max_concurrency),
+            uploaded_by=uploaded_by,
+            allow_near_duplicate=allow_near_duplicate,
         )
 
 
@@ -186,7 +212,7 @@ def _chunk_stats(graph: Graph, doc_id: str) -> dict[str, tuple[int, int, int]]:
     return {chunk_id: tuple(values) for chunk_id, values in stats.items()}
 
 
-def _result_from_existing(graph: Graph, props: dict, elapsed: float) -> IngestionResult:
+def _result_from_existing(graph: Graph, props: dict, elapsed: float, reason: str = "") -> IngestionResult:
     document = Document(
         id=props["id"],
         filename=props["filename"],
@@ -194,6 +220,9 @@ def _result_from_existing(graph: Graph, props: dict, elapsed: float) -> Ingestio
         source_hash=props["source_hash"],
         ocr_used=props.get("ocr_used", False),
         ingested_at=datetime.fromisoformat(props["ingested_at"]),
+        ingested_by=props.get("ingested_by") or LEGACY_UPLOADER,
+        ingested_by_name=props.get("ingested_by_name") or ("Admin" if not props.get("ingested_by") else ""),
+        content_hash=props.get("content_hash") or "",
     )
     if "chunk_count" in props:
         stats = {
@@ -217,7 +246,44 @@ def _result_from_existing(graph: Graph, props: dict, elapsed: float) -> Ingestio
             "definitions_missing": len(entities) - matched,
             "ocr_pages_used": 0,
         }
-    return IngestionResult(document=document, elapsed_seconds=elapsed, duplicate=True, **stats)
+    return IngestionResult(
+        document=document, elapsed_seconds=elapsed, duplicate=True, duplicate_reason=reason, **stats
+    )
+
+
+def _check_content_duplicates(
+    graph: Graph, fp: Fingerprint, doc_type: DocType, resume_from: Optional[dict], allow_near_duplicate: bool
+) -> Optional[dict]:
+    """Returns an already ingested document of this type with the same text,
+    if any. Raises NearDuplicateFound for very similar ones (unless
+    allowed). Like the file check, a textbook never blocks a patient record
+    with the same text or the other way round."""
+    own_id = resume_from["id"] if resume_from else None
+    for props in find_documents_by_content_hash(graph, fp.content_hash, doc_type):
+        if props["id"] != own_id:
+            return props
+    if allow_near_duplicate or not fp.signature:
+        return None
+    matches = []
+    for props, signature in document_signatures(graph, doc_type):
+        if props["id"] == own_id:
+            continue
+        score = similarity(fp.signature, signature)
+        if score >= NEAR_DUPLICATE_THRESHOLD:
+            matches.append(
+                {
+                    "id": props["id"],
+                    "filename": props.get("filename", ""),
+                    "doc_type": props.get("doc_type", ""),
+                    "ingested_by": props.get("ingested_by", ""),
+                    "ingested_by_name": props.get("ingested_by_name", ""),
+                    "ingested_at": props.get("ingested_at", ""),
+                    "similarity": round(score, 3),
+                }
+            )
+    if matches:
+        raise NearDuplicateFound(sorted(matches, key=lambda m: -m["similarity"]))
+    return None
 
 
 def _ingest_loaded(
@@ -234,19 +300,21 @@ def _ingest_loaded(
     on_document: Optional[Callable[[str], None]] = None,
     resume_from: Optional[dict] = None,
     llm: Optional[tuple[str, int]] = None,
+    uploaded_by: tuple[str, str] = ("", ""),
+    allow_near_duplicate: bool = False,
 ) -> IngestionResult:
     llm = llm or ("ollama", settings.ingest_max_concurrency)
-    ocr_pages_used = 0
-    page_texts: list[str] = []
-    for page in loaded.pages:
-        text = page.text
-        if needs_ocr(text, page.image_area, settings.ocr_text_density_threshold):
-            if page.image_bytes is not None:
-                text = ocr_image(page.image_bytes)
-                ocr_pages_used += 1
-        page_texts.append(text)
+    full_text, ocr_pages_used = extract_text(loaded, settings)
 
-    full_text = "\n\n".join(page_texts)
+    # Fingerprinted before de-identification, so the same record uploaded
+    # twice matches even if the de-identifier's output changes.
+    fp = fingerprint(full_text)
+    if full_text.strip():
+        same_text = _check_content_duplicates(graph, fp, doc_type, resume_from, allow_near_duplicate)
+        if same_text is not None:
+            return _result_from_existing(
+                graph, same_text, elapsed=time.monotonic() - start, reason="same_content"
+            )
 
     # Patient records are de-identified before chunking, so the graph (chunk
     # text, extracted entities) never holds names, IDs or other identifiers.
@@ -262,12 +330,19 @@ def _ingest_loaded(
         doc_type=doc_type,
         source_hash=loaded.source_hash,
         ocr_used=ocr_pages_used > 0,
+        ingested_by=uploaded_by[0],
+        ingested_by_name=uploaded_by[1],
+        content_hash=fp.content_hash,
     )
     if resume_from is not None:
         # Continue the interrupted run's document rather than starting over.
         document.id = resume_from["id"]
         document.ingested_at = datetime.fromisoformat(resume_from["ingested_at"])
+        if resume_from.get("ingested_by"):
+            document.ingested_by = resume_from["ingested_by"]
+            document.ingested_by_name = resume_from.get("ingested_by_name", "")
     writer.write_document(document)
+    writer.set_fingerprint(document.id, fp.content_hash, fp.signature)
     try:
         if on_document:
             on_document(document.id)
@@ -356,6 +431,21 @@ def _ingest_loaded(
     )
     writer.mark_document_complete(result)
     return result
+
+
+def extract_text(loaded: LoadedDocument, settings: Settings) -> tuple[str, int]:
+    """The document's full text, with OCR for pages that need it, and how
+    many pages were OCR'd."""
+    ocr_pages_used = 0
+    page_texts: list[str] = []
+    for page in loaded.pages:
+        text = page.text
+        if needs_ocr(text, page.image_area, settings.ocr_text_density_threshold):
+            if page.image_bytes is not None:
+                text = ocr_image(page.image_bytes)
+                ocr_pages_used += 1
+        page_texts.append(text)
+    return "\n\n".join(page_texts), ocr_pages_used
 
 
 def _chunk_size(settings: Settings, doc_type: DocType) -> int:

@@ -123,6 +123,40 @@ def deid_backfill() -> None:
     console.print(table)
 
 
+@app.command(name="fingerprint-backfill")
+def fingerprint_backfill() -> None:
+    """Fingerprint documents ingested before duplicate-content checks
+    existed, from their uploaded files, so new uploads are compared with
+    them too. Documents whose file is gone are listed and skipped."""
+    from jivaka.config import get_settings
+    from jivaka.db.schema import ensure_schema
+    from jivaka.ingestion.fingerprint import fingerprint
+    from jivaka.ingestion.graph_writer import GraphWriter
+    from jivaka.ingestion.intake import load_document
+    from jivaka.ingestion.pipeline import extract_text
+
+    settings = get_settings()
+    graph = get_graph()
+    ensure_schema(graph)
+    writer = GraphWriter(graph)
+    rows = graph.query(
+        "MATCH (d:Document) WHERE d.content_signature IS NULL RETURN d.id, d.filename"
+    ).result_set
+    table = Table(title="Fingerprints")
+    table.add_column("document")
+    table.add_column("result")
+    for doc_id, filename in rows:
+        path = Path(settings.upload_dir) / Path(filename or "").name
+        if not filename or not path.exists():
+            table.add_row(filename or doc_id, "[yellow]skipped: uploaded file not found[/yellow]")
+            continue
+        text, _ = extract_text(load_document(path), settings)
+        fp = fingerprint(text)
+        writer.set_fingerprint(doc_id, fp.content_hash, fp.signature)
+        table.add_row(filename, "done")
+    console.print(table)
+
+
 def _print_graph(doc_id: str, graph) -> None:
     dump = get_document_graph(graph, doc_id)
     if dump is None:

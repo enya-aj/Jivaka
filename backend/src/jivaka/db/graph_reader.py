@@ -10,7 +10,49 @@ def list_documents(graph: Graph, limit: int = 50) -> list[dict]:
         "MATCH (d:Document) RETURN d ORDER BY d.ingested_at DESC LIMIT $limit",
         params={"limit": limit},
     )
+    return [_public(row[0].properties) for row in result.result_set]
+
+
+# Fallback uploader for documents ingested before sign-in existed.
+LEGACY_UPLOADER = "admin"
+
+
+def _public(props: dict) -> dict:
+    """Document properties for the API: without the bulky similarity
+    signature, and with the uploader filled in for older documents."""
+    props = {k: v for k, v in props.items() if k != "content_signature"}
+    if not props.get("ingested_by"):
+        props["ingested_by"] = LEGACY_UPLOADER
+        props["ingested_by_name"] = props.get("ingested_by_name") or "Admin"
+    return props
+
+
+def find_documents_by_content_hash(graph: Graph, content_hash: str, doc_type: str) -> list[dict]:
+    """Completed documents of this type whose extracted text is the same,
+    whatever their filename or file format."""
+    result = graph.query(
+        "MATCH (d:Document {content_hash: $content_hash, doc_type: $doc_type}) "
+        "WHERE d.ingestion_complete IS NULL OR d.ingestion_complete = true "
+        "RETURN d ORDER BY d.ingested_at",
+        params={"content_hash": content_hash, "doc_type": doc_type},
+    )
     return [row[0].properties for row in result.result_set]
+
+
+def document_signatures(graph: Graph, doc_type: str) -> list[tuple[dict, list[int]]]:
+    """(document, signature) for every completed document of this type that
+    has one."""
+    result = graph.query(
+        "MATCH (d:Document {doc_type: $doc_type}) WHERE d.content_signature IS NOT NULL "
+        "AND (d.ingestion_complete IS NULL OR d.ingestion_complete = true) "
+        "RETURN d",
+        params={"doc_type": doc_type},
+    )
+    out = []
+    for row in result.result_set:
+        props = row[0].properties
+        out.append((_public(props), list(props.get("content_signature") or [])))
+    return out
 
 
 def find_documents_by_hash(graph: Graph, source_hash: str, doc_type: str) -> list[dict]:
@@ -33,7 +75,7 @@ def get_document_graph(graph: Graph, doc_id: str) -> Optional[dict]:
     doc_result = graph.query("MATCH (d:Document {id: $doc_id}) RETURN d", params={"doc_id": doc_id})
     if not doc_result.result_set:
         return None
-    document = doc_result.result_set[0][0].properties
+    document = _public(doc_result.result_set[0][0].properties)
 
     chunks_result = graph.query(
         "MATCH (:Document {id: $doc_id})-[:HAS_CHUNK]->(c:Chunk) RETURN c ORDER BY c.order",

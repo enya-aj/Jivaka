@@ -3,6 +3,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from jivaka.ingestion.models import IngestionResult
@@ -14,6 +15,9 @@ class JobStatus(str, enum.Enum):
     succeeded = "succeeded"
     failed = "failed"
     cancelled = "cancelled"
+    # Very similar to a document already ingested: waits for the uploader
+    # to choose "ingest anyway" (POST /jobs/{id}/confirm) or cancel.
+    needs_confirmation = "needs_confirmation"
 
 
 ACTIVE_STATUSES = (JobStatus.queued, JobStatus.running)
@@ -35,6 +39,13 @@ class Job:
     cancel_requested: bool = False
     result: Optional[IngestionResult] = None
     error: Optional[str] = None
+    # Who uploaded the file (Google email and name).
+    uploaded_by: str = ""
+    uploaded_by_name: str = ""
+    # The saved upload, kept while waiting for confirmation.
+    path: Optional[str] = None
+    # Near-duplicate documents found, for needs_confirmation.
+    similar: list = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -50,6 +61,9 @@ class Job:
             "cancel_requested": self.cancel_requested,
             "result": self.result,
             "error": self.error,
+            "uploaded_by": self.uploaded_by,
+            "uploaded_by_name": self.uploaded_by_name,
+            "similar": self.similar,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -66,8 +80,23 @@ _lock = threading.Lock()
 FINISHED_JOB_TTL_SECONDS = 24 * 3600
 
 
-def create_job(filename: str = "", doc_type: str = "", model: Optional[dict] = None) -> Job:
-    job = Job(id=str(uuid.uuid4()), filename=filename, doc_type=doc_type, model=model)
+def create_job(
+    filename: str = "",
+    doc_type: str = "",
+    model: Optional[dict] = None,
+    uploaded_by: str = "",
+    uploaded_by_name: str = "",
+    path: Optional[str] = None,
+) -> Job:
+    job = Job(
+        id=str(uuid.uuid4()),
+        filename=filename,
+        doc_type=doc_type,
+        model=model,
+        uploaded_by=uploaded_by,
+        uploaded_by_name=uploaded_by_name,
+        path=path,
+    )
     with _lock:
         _jobs[job.id] = job
     return job
@@ -95,7 +124,10 @@ def list_jobs(now: Optional[float] = None) -> list[Job]:
             for j in _jobs.values()
             if j.status not in ACTIVE_STATUSES and now - j.updated_at > FINISHED_JOB_TTL_SECONDS
         ]:
-            del _jobs[job_id]
+            expired = _jobs.pop(job_id)
+            if expired.status == JobStatus.needs_confirmation and expired.path:
+                # Nobody chose; drop the upload that was waiting.
+                Path(expired.path).unlink(missing_ok=True)
         jobs = list(_jobs.values())
     return sorted(jobs, key=lambda j: j.created_at, reverse=True)
 

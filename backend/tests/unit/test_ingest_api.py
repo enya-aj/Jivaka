@@ -34,7 +34,7 @@ def test_ingest_job_reports_document_and_progress(monkeypatch, tmp_path):
     monkeypatch.setattr(routes, "get_graph", lambda: None)
     seen = {}
 
-    def fake_ingest(path, doc_type, graph, on_progress, on_document):
+    def fake_ingest(path, doc_type, graph, on_progress, on_document, **kwargs):
         result = _result(path.name)
         on_document(result.document.id)
         seen["after_document"] = get_job(job_ids[0]).to_dict()
@@ -73,7 +73,7 @@ def test_cancel_stops_a_running_ingest(monkeypatch, tmp_path):
     started = threading.Event()
     release = threading.Event()
 
-    def fake_ingest(path, doc_type, graph, on_progress, on_document):
+    def fake_ingest(path, doc_type, graph, on_progress, on_document, **kwargs):
         on_document("doc-1")
         started.set()
         release.wait(5)
@@ -142,7 +142,7 @@ class _FakeDeleteGraph:
 
     def query(self, cypher, params=None):
         self.queries.append(cypher)
-        rows = [] if self.filename is None else [[self.filename]]
+        rows = [] if self.filename is None else [[self.filename, None]]
         return type("R", (), {"result_set": rows if "RETURN d.filename" in cypher else []})()
 
 
@@ -213,3 +213,87 @@ def test_models_endpoint_reports_each_doc_type(monkeypatch):
     assert body["ingest"]["textbook"] == {"provider": "openrouter", "model": "vendor/free-model:free"}
     assert body["ingest"]["patient_record"] == {"provider": "ollama", "model": "llama3"}
     assert body["chat"] == {"provider": "ollama", "model": "llama3"}
+
+
+def _as(user):
+    from jivaka.auth import deps
+
+    app.dependency_overrides[deps.current_user] = lambda: user
+
+
+def test_near_duplicate_waits_then_ingests_on_confirm(monkeypatch, tmp_path):
+    from jivaka.auth.store import User
+    from jivaka.ingestion.pipeline import NearDuplicateFound
+
+    monkeypatch.setattr(routes, "get_settings", lambda: type("S", (), {"upload_dir": str(tmp_path)})())
+    monkeypatch.setattr(routes, "get_graph", lambda: None)
+    calls = []
+
+    def fake_ingest(path, doc_type, graph, on_progress, on_document, uploaded_by, allow_near_duplicate):
+        calls.append((uploaded_by, allow_near_duplicate))
+        if not allow_near_duplicate:
+            raise NearDuplicateFound([{"id": "old", "filename": "book.pdf", "similarity": 0.95}])
+        return _result(path.name)
+
+    monkeypatch.setattr(routes, "ingest_document", fake_ingest)
+    doctor = User(email="doc@gmail.com", name="Dr Doc", role="doctor")
+    other = User(email="other@gmail.com", name="Other", role="doctor")
+    client = TestClient(app)
+    try:
+        _as(doctor)
+        job_id = _upload(client, "book-2nd-edition.txt")
+        job = client.get(f"/jobs/{job_id}").json()
+        assert job["status"] == "needs_confirmation"
+        assert job["similar"][0]["id"] == "old"
+        assert job["uploaded_by"] == "doc@gmail.com"
+        assert len(list(tmp_path.iterdir())) == 1  # upload kept while waiting
+
+        _as(other)
+        assert client.post(f"/jobs/{job_id}/confirm").status_code == 403
+
+        _as(doctor)
+        assert client.post(f"/jobs/{job_id}/confirm").status_code == 200
+        assert client.get(f"/jobs/{job_id}").json()["status"] == "succeeded"
+        assert calls == [(("doc@gmail.com", "Dr Doc"), False), (("doc@gmail.com", "Dr Doc"), True)]
+        assert client.post(f"/jobs/{job_id}/confirm").status_code == 409
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_cancelling_a_held_upload_deletes_it(monkeypatch, tmp_path):
+    upload = tmp_path / "held.txt"
+    upload.write_text("x")
+    job = routes.job_registry.create_job(filename="held.txt", doc_type="textbook", path=str(upload))
+    routes.job_registry.update_job(job.id, status=routes.job_registry.JobStatus.needs_confirmation)
+
+    assert TestClient(app).post(f"/jobs/{job.id}/cancel").json()["status"] == "cancelled"
+    assert not upload.exists()
+
+
+def test_doctors_delete_only_their_own_documents(monkeypatch, tmp_path):
+    from jivaka.auth.store import User
+
+    _upload_dir(monkeypatch, tmp_path)
+
+    class OwnedGraph(_FakeDeleteGraph):
+        def __init__(self, owner):
+            super().__init__("abc_doc.pdf")
+            self.owner = owner
+
+        def query(self, cypher, params=None):
+            self.queries.append(cypher)
+            rows = [[self.filename, self.owner]] if "RETURN d.filename" in cypher else []
+            return type("R", (), {"result_set": rows})()
+
+    client = TestClient(app)
+    try:
+        _as(User(email="doc@gmail.com", name="", role="doctor"))
+        monkeypatch.setattr(routes, "get_graph", lambda: OwnedGraph("other@gmail.com"))
+        assert client.delete("/documents/doc-1").status_code == 403
+        # Documents from before sign-in belong to the admin.
+        monkeypatch.setattr(routes, "get_graph", lambda: OwnedGraph(None))
+        assert client.delete("/documents/doc-1").status_code == 403
+        monkeypatch.setattr(routes, "get_graph", lambda: OwnedGraph("doc@gmail.com"))
+        assert client.delete("/documents/doc-1").status_code == 200
+    finally:
+        app.dependency_overrides.clear()

@@ -5,6 +5,7 @@ from falkordb import Graph
 INDEXES = [
     ("Document", "id"),
     ("Document", "source_hash"),
+    ("Document", "content_hash"),
     ("Document", "pseudonym"),
     ("Chunk", "id"),
     ("Chunk", "doc_id"),

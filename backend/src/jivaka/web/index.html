@@ -114,7 +114,9 @@
   .badge.done { color: var(--success); }
   .badge.failed { color: var(--danger); }
   .badge.cancelled, .badge.queued { color: var(--muted); }
-  .badge.interrupted { color: var(--warning); }
+  .badge.interrupted, .badge.needs_confirmation { color: var(--warning); }
+  .doc-list .similar { display: block; font-size: 0.8rem; color: var(--muted); margin-top: 0.2rem; }
+  .doc-list .by { color: var(--muted); }
   .badge .spinner { width: 10px; height: 10px; border-width: 2px; }
   button.link {
     background: none; color: var(--danger); padding: 0; font-size: 0.8rem;
@@ -242,6 +244,39 @@ function formatTime(value) {
   return new Date(value).toLocaleString();
 }
 
+// The signed-in user (from /me), for showing only the buttons they may use.
+let me = null;
+window.jivakaUser.then((user) => { me = user; lastListSignature = ""; loadRecentDocuments(); });
+
+function uploaderLabel(email, name) {
+  if (!email) return "";
+  if (me && email === me.email) return "you";
+  return name || email;
+}
+
+function mayManage(ownerEmail) {
+  if (!me) return false;
+  return me.role === "admin" || (ownerEmail && ownerEmail === me.email);
+}
+
+async function confirmJob(job) {
+  const res = await fetch(`${API}/jobs/${job.id}/confirm`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    setStatusText("error", body.detail || `Could not continue ${displayName(job.filename)}.`);
+  } else {
+    myJobs.add(job.id);
+    setStatusText("", `Ingesting ${displayName(job.filename)} anyway…`);
+  }
+  loadRecentDocuments();
+}
+
+function similarText(match) {
+  const pct = Math.round(match.similarity * 100);
+  const who = uploaderLabel(match.ingested_by, match.ingested_by_name) || "admin";
+  return `${pct}% the same as ${displayName(match.filename)}, uploaded by ${who} on ${formatTime(match.ingested_at)}`;
+}
+
 // Jobs submitted from this tab, so their result can be shown when they finish.
 const myJobs = new Set();
 let lastListSignature = "";
@@ -255,7 +290,7 @@ async function cancelJob(job) {
 
 function jobRow(job) {
   let status = job.status;
-  let text = job.status;
+  let text = job.status === "needs_confirmation" ? "very similar document exists" : job.status;
   if (job.status === "running" || job.status === "queued") {
     if (job.cancel_requested) text = "cancelling…";
     else if (job.progress) text = `${job.status} · ${job.progress}`;
@@ -264,14 +299,35 @@ function jobRow(job) {
   if (job.status === "failed" && job.error) {
     name.appendChild(el("span", { class: "detail", text: job.error }));
   }
+  if (job.status === "needs_confirmation") {
+    for (const match of job.similar || []) {
+      name.appendChild(el("span", { class: "similar", text: similarText(match) }));
+    }
+  }
+  const by = uploaderLabel(job.uploaded_by, job.uploaded_by_name);
   const meta = el("span", { class: "meta" }, [
     badge(status, text),
     ...(job.model && (job.status === "running" || job.status === "queued")
       ? [providerTag(job.model.provider, job.model.model)]
       : []),
-    el("span", { text: `${job.doc_type} · ${formatTime(job.created_at * 1000)}` }),
+    el("span", { text: `${job.doc_type} · ${formatTime(job.created_at * 1000)}${by ? ` · by ${by}` : ""}` }),
   ]);
-  if ((job.status === "running" || job.status === "queued") && !job.cancel_requested) {
+  const canManage = mayManage(job.uploaded_by);
+  if (job.status === "needs_confirmation" && canManage) {
+    const go = el("button", { class: "link", type: "button", text: "Ingest anyway" });
+    go.addEventListener("click", (evt) => {
+      evt.stopPropagation();
+      confirmJob(job);
+    });
+    const stop = el("button", { class: "link", type: "button", text: "Cancel" });
+    stop.addEventListener("click", async (evt) => {
+      evt.stopPropagation();
+      await fetch(`${API}/jobs/${job.id}/cancel`, { method: "POST" });
+      loadRecentDocuments();
+    });
+    meta.append(go, stop);
+  }
+  if ((job.status === "running" || job.status === "queued") && !job.cancel_requested && canManage) {
     const btn = el("button", { class: "link", type: "button", text: "Cancel" });
     btn.addEventListener("click", (evt) => {
       evt.stopPropagation();
@@ -279,7 +335,7 @@ function jobRow(job) {
     });
     meta.appendChild(btn);
   }
-  if (job.status === "cancelled" || job.status === "failed") {
+  if ((job.status === "cancelled" || job.status === "failed") && canManage) {
     const btn = el("button", { class: "link", type: "button", text: "✕", title: "Remove from list" });
     btn.setAttribute("aria-label", "Remove from list");
     btn.addEventListener("click", (evt) => {
@@ -325,17 +381,21 @@ function docRow(doc) {
     el("span", { class: "meta" }, [
       badge(status),
       el("span", { text: `${doc.doc_type} · ${formatTime(doc.ingested_at)}` }),
+      el("span", { class: "by", text: `by ${uploaderLabel(doc.ingested_by, doc.ingested_by_name) || "admin"}`, title: doc.ingested_by || "" }),
     ]),
   ]);
   if (status === "interrupted") {
     item.title = "Ingestion stopped before finishing (for example the server restarted). Upload the same file again to continue where it stopped, or delete it.";
   }
-  const btn = el("button", { class: "link", type: "button", text: "Delete" });
-  btn.addEventListener("click", (evt) => {
-    evt.stopPropagation();
-    deleteDocument(doc, status === "interrupted");
-  });
-  item.querySelector(".meta").appendChild(btn);
+  // Documents from before sign-in (ingested_by "admin") only admins delete.
+  if (mayManage(doc.ingested_by)) {
+    const btn = el("button", { class: "link", type: "button", text: "Delete" });
+    btn.addEventListener("click", (evt) => {
+      evt.stopPropagation();
+      deleteDocument(doc, status === "interrupted");
+    });
+    item.querySelector(".meta").appendChild(btn);
+  }
   item.addEventListener("click", () => showGraph(doc.id));
   return item;
 }
@@ -346,10 +406,14 @@ async function handleFinishedJobs(jobs) {
     myJobs.delete(job.id);
     const name = displayName(job.filename);
     if (job.status === "succeeded") {
+      const existing = job.result.document;
+      const firstBy = uploaderLabel(existing.ingested_by, existing.ingested_by_name) || "admin";
       setStatusText(
         "success",
         job.result.duplicate
-          ? `Already ingested: ${name} was uploaded before, so it's showing the existing document instead of adding a copy.`
+          ? job.result.duplicate_reason === "same_content"
+            ? `Not added: ${name} has the same text as ${displayName(existing.filename)}, uploaded by ${firstBy} on ${formatTime(existing.ingested_at)}. Showing that document instead.`
+            : `Already ingested: ${name} was uploaded before by ${firstBy} on ${formatTime(existing.ingested_at)}, so it's showing the existing document instead of adding a copy.`
           : job.result.resumed_chunks
             ? `Done: ${name}. Continued where the earlier run stopped (${job.result.resumed_chunks} of ${job.result.chunk_count} chunks were already done).`
             : `Done: ${name}.`
@@ -359,6 +423,11 @@ async function handleFinishedJobs(jobs) {
       setStatusText("error", `Failed: ${name}: ${job.error || "unknown error"}`);
     } else if (job.status === "cancelled") {
       setStatusText("", `Cancelled: ${name}.`);
+    } else if (job.status === "needs_confirmation") {
+      setStatusText(
+        "error",
+        `Wait: ${name} is very similar to a document already ingested. Check Recent documents, then choose Ingest anyway or Cancel.`
+      );
     }
   }
 }
