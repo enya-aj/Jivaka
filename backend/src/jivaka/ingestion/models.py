@@ -4,7 +4,14 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
-DocType = Literal["patient_record", "textbook"]
+DocType = Literal["patient_record", "textbook", "patient_transcript"]
+# Document types about a patient: de-identified before chunking, kept on
+# the local Ollama model, and never shown to students.
+PATIENT_DOC_TYPES: frozenset[str] = frozenset({"patient_record", "patient_transcript"})
+
+
+def is_patient_doc(doc_type: object) -> bool:
+    return doc_type in PATIENT_DOC_TYPES
 EntityType = Literal["symptom", "diagnosis", "treatment", "other"]
 ExtractionSource = Literal["llm", "ner"]
 

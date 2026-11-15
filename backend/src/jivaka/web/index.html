@@ -115,6 +115,13 @@
   .badge.failed { color: var(--danger); }
   .badge.cancelled, .badge.queued { color: var(--muted); }
   .badge.interrupted, .badge.needs_confirmation { color: var(--warning); }
+  .soap { border: 1px solid var(--border); border-radius: 8px; padding: 0.9rem 1rem; margin-bottom: 1rem; }
+  .soap h3 { margin: 0 0 0.5rem; font-size: 1rem; }
+  .soap dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.4rem 1rem; margin: 0; }
+  .soap dt { font-weight: 600; }
+  .soap dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .soap .plain { margin: 0.75rem 0 0; white-space: pre-wrap; }
+  .soap .soap-meta { color: var(--muted); font-size: 0.8rem; margin-top: 0.6rem; display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; }
   .doc-list .similar { display: block; font-size: 0.8rem; color: var(--muted); margin-top: 0.2rem; }
   .doc-list .by { color: var(--muted); }
   .badge .spinner { width: 10px; height: 10px; border-width: 2px; }
@@ -182,6 +189,7 @@
       <select id="doc_type" name="doc_type">
         <option value="patient_record">patient_record</option>
         <option value="textbook">textbook</option>
+        <option value="patient_transcript">patient conversation transcript</option>
       </select>
       <p class="model-note" id="model-note"></p>
 
@@ -198,6 +206,7 @@
         <button type="button" id="view-graph-btn">Graph</button>
       </div>
     </div>
+    <div id="soap-panel" class="soap" hidden></div>
     <table id="summary-table"></table>
     <div id="graph-tree" class="tree"></div>
     <div id="graph-diagram" style="display:none;"></div>
@@ -938,6 +947,58 @@ async function showGraph(docId, resultForSummary) {
   else document.getElementById("summary-table").innerHTML = "";
   renderTree(dump);
   setResultView(resultView);
+  renderSoap(dump.document);
+}
+
+const SOAP_LABELS = {
+  en: { subjective: "Subjective", objective: "Objective", assessment: "Assessment", plan: "Plan", plain: "In plain words" },
+  th: { subjective: "Subjective (อาการที่ผู้ป่วยเล่า)", objective: "Objective (ผลตรวจ)", assessment: "Assessment (การประเมิน)", plan: "Plan (แผนการรักษา)", plain: "สรุปแบบเข้าใจง่าย" },
+};
+let soapTimer = null;
+
+async function renderSoap(doc) {
+  clearTimeout(soapTimer);
+  const panel = document.getElementById("soap-panel");
+  panel.textContent = "";
+  if (!doc || doc.doc_type !== "patient_transcript") {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  const res = await fetch(`${API}/documents/${doc.id}/summary`);
+  const info = res.ok ? await res.json() : { status: "failed", error: "Couldn't load the summary." };
+  panel.textContent = "";
+  panel.appendChild(el("h3", { text: "Conversation summary" }));
+  const meta = el("div", { class: "soap-meta" });
+  if (info.status === "running") {
+    panel.appendChild(el("p", { text: "Writing the summary with the local model… This page updates when it's ready." }));
+    soapTimer = setTimeout(() => renderSoap(doc), 4000);
+  } else if (info.summary) {
+    const labels = SOAP_LABELS[info.summary.language] || SOAP_LABELS.en;
+    const dl = el("dl");
+    for (const field of ["subjective", "objective", "assessment", "plan"]) {
+      dl.append(el("dt", { text: labels[field] }), el("dd", { text: info.summary[field] || "—" }));
+    }
+    panel.appendChild(dl);
+    if (info.summary.plain_summary) {
+      panel.appendChild(el("h3", { text: labels.plain, style: "margin-top: 0.9rem;" }));
+      panel.appendChild(el("p", { class: "plain", text: info.summary.plain_summary }));
+    }
+    meta.appendChild(el("span", { text: `Written by ${info.summary.model || "the local model"} on ${formatTime(info.summary.created_at * 1000)} from the de-identified transcript. Check it against the conversation before using it.` }));
+  } else if (info.status === "failed") {
+    panel.appendChild(el("p", { class: "error", text: `The summary failed: ${info.error || "unknown error"}` }));
+  } else {
+    panel.appendChild(el("p", { text: "No summary yet." }));
+  }
+  if (info.status !== "running" && me && me.can_ingest) {
+    const again = el("button", { class: "link", type: "button", text: info.summary ? "Write again" : "Write summary" });
+    again.addEventListener("click", async () => {
+      await fetch(`${API}/documents/${doc.id}/summary`, { method: "POST" });
+      renderSoap(doc);
+    });
+    meta.appendChild(again);
+  }
+  panel.appendChild(meta);
 }
 
 function setStatus(html) {
@@ -1009,6 +1070,9 @@ function renderModels() {
   bar.innerHTML = "";
   bar.appendChild(modelItem("Textbooks:", models.ingest.textbook, docType === "textbook"));
   bar.appendChild(modelItem("Patient records:", models.ingest.patient_record, docType === "patient_record"));
+  if (models.ingest.patient_transcript) {
+    bar.appendChild(modelItem("Transcripts:", models.ingest.patient_transcript, docType === "patient_transcript"));
+  }
   bar.appendChild(modelItem("Chat:", models.chat, false));
   const chosen = models.ingest[docType];
   note.textContent = chosen

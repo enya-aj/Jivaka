@@ -180,11 +180,13 @@ def _parse_json_reply(content: str) -> dict:
 
 def _uses_openrouter(doc_type: Optional[str]) -> bool:
     """Whether ingestion sends this document type to OpenRouter, following
-    INGEST_LLM_PROVIDER. Patient records stay on Ollama unless
-    OPENROUTER_FOR_PATIENT_RECORDS is on."""
+    INGEST_LLM_PROVIDER. Patient records and conversation transcripts stay
+    on Ollama unless OPENROUTER_FOR_PATIENT_RECORDS is on."""
+    from jivaka.ingestion.models import is_patient_doc
+
     settings = get_settings()
     return settings.ingest_llm_provider == "openrouter" and (
-        doc_type != "patient_record" or settings.openrouter_for_patient_records
+        not is_patient_doc(doc_type) or settings.openrouter_for_patient_records
     )
 
 

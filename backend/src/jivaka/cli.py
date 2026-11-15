@@ -22,12 +22,13 @@ class DocTypeArg(str, enum.Enum):
 
     patient_record = "patient_record"
     textbook = "textbook"
+    patient_transcript = "patient_transcript"
 
 
 @app.command()
 def ingest(
     path: Path = typer.Argument(..., exists=True, readable=True, help="Document to ingest"),
-    doc_type: DocTypeArg = typer.Option(..., "--doc-type", help="patient_record or textbook"),
+    doc_type: DocTypeArg = typer.Option(..., "--doc-type", help="patient_record, textbook or patient_transcript"),
     print_graph: bool = typer.Option(False, "--print-graph", help="Print the resulting graph"),
 ) -> None:
     """Ingest one document into the trinity graph."""
@@ -121,6 +122,16 @@ def deid_backfill() -> None:
     for r in results:
         table.add_row(r.doc_id, r.pseudonym, str(r.chunks_updated), str(r.entities_removed))
     console.print(table)
+
+
+@app.command()
+def summarize(doc_id: str = typer.Argument(..., help="Document id of a patient conversation transcript")) -> None:
+    """Write (or rewrite) a transcript's SOAP summary with the local Ollama model."""
+    from jivaka.transcripts.summary import summarize_document
+
+    summary = summarize_document(get_graph(), doc_id)
+    for field in ("subjective", "objective", "assessment", "plan", "plain_summary"):
+        console.print(f"[bold]{field}[/bold]: {summary.get(field, '')}")
 
 
 @app.command(name="fingerprint-backfill")

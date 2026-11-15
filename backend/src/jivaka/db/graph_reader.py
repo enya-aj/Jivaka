@@ -1,3 +1,4 @@
+import json
 from typing import Optional
 
 from falkordb import Graph
@@ -21,6 +22,12 @@ def _public(props: dict) -> dict:
     """Document properties for the API: without the bulky similarity
     signature, and with the uploader filled in for older documents."""
     props = {k: v for k, v in props.items() if k != "content_signature"}
+    if isinstance(props.get("summary"), str):
+        # Transcript summaries are stored as JSON text.
+        try:
+            props["summary"] = json.loads(props["summary"])
+        except ValueError:
+            props["summary"] = None
     if not props.get("ingested_by"):
         props["ingested_by"] = LEGACY_UPLOADER
         props["ingested_by_name"] = props.get("ingested_by_name") or "Admin"

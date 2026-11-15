@@ -315,7 +315,8 @@ async function openSource(source, button) {
   });
   panel.appendChild(close);
   panel.appendChild(el("h2", { text: `[${source.number}] ${source.source_label}` }));
-  const meta = [source.doc_type === "patient_record" ? "Patient record (anonymized)" : "Textbook", sourceMeta(source)]
+  const kind = { patient_record: "Patient record (anonymized)", patient_transcript: "Patient conversation (anonymized)" };
+  const meta = [kind[source.doc_type] || "Textbook", sourceMeta(source)]
     .filter(Boolean)
     .join(" · ");
   panel.appendChild(el("div", { class: "meta", text: meta }));

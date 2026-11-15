@@ -10,9 +10,10 @@ from falkordb import Graph
 RELATED_WEIGHT = 0.5
 
 # Patient chunks are only ever read once de-identified (see jivaka.deid).
-_READABLE = "(c.source_type <> 'patient_record' OR c.deidentified = true)"
+_PATIENT_TYPES = "['patient_record', 'patient_transcript']"
+_READABLE = f"(NOT c.source_type IN {_PATIENT_TYPES} OR c.deidentified = true)"
 # For people who may not see patient records at all (students).
-_READABLE_NO_PATIENTS = "(c.source_type <> 'patient_record')"
+_READABLE_NO_PATIENTS = f"(NOT c.source_type IN {_PATIENT_TYPES})"
 
 
 def _readable(include_patients: bool) -> str:
@@ -144,6 +145,8 @@ def load_chunks(graph: Graph, chunk_ids: Sequence[str], include_patients: bool =
         if doc_type == "patient_record":
             # Never the filename: it often carries the patient's name.
             label = f"Patient {pseudonym}" if pseudonym else "Patient record"
+        elif doc_type == "patient_transcript":
+            label = f"Patient {pseudonym} (conversation)" if pseudonym else "Patient conversation"
         else:
             label = _UPLOAD_PREFIX_RE.sub("", filename or "") or "Unknown document"
         chunks[props["id"]] = RetrievedChunk(

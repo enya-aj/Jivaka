@@ -13,15 +13,16 @@ from jivaka.db.graph_reader import get_document_graph, list_documents
 from jivaka.ingestion.extraction.llm_client import describe_extraction_model
 from jivaka.ingestion.graph_writer import GraphWriter
 from jivaka.ingestion.intake import SUPPORTED_EXTENSIONS
-from jivaka.ingestion.models import DocType
+from jivaka.ingestion.models import DocType, is_patient_doc
 from jivaka.ingestion.pipeline import IngestionCancelled, NearDuplicateFound, ingest_document
+from jivaka.transcripts.summary import stored_summary, summarize_document
 
 router = APIRouter()
 
 
 def _may_see(user: User, doc_type: object) -> bool:
     """Students never see patient records, not even their filenames."""
-    return user.can_see_patient_records or doc_type != "patient_record"
+    return user.can_see_patient_records or not is_patient_doc(doc_type)
 
 
 @router.post("/ingest")
@@ -106,6 +107,8 @@ def _run_ingest_job(job_id: str, path: Path, doc_type: DocType, allow_near_dupli
         if result.duplicate:
             # Already ingested from an identical file, so this copy isn't needed.
             path.unlink(missing_ok=True)
+        if doc_type == "patient_transcript":
+            _summarize_after_ingest(job_id, graph, result.document.id)
         job_registry.update_job(
             job_id, status=job_registry.JobStatus.succeeded, result=result, doc_id=result.document.id
         )
@@ -121,13 +124,75 @@ def _run_ingest_job(job_id: str, path: Path, doc_type: DocType, allow_near_dupli
         job_registry.update_job(job_id, status=job_registry.JobStatus.failed, error=str(exc))
 
 
+def _summarize_after_ingest(job_id: str, graph, doc_id: str) -> None:
+    """Writes a new transcript's SOAP summary. A failed summary doesn't fail
+    the ingest: the transcript is in the graph, and the summary can be
+    retried from the ingest page."""
+    rows = graph.query(
+        "MATCH (d:Document {id: $id}) RETURN d.summary_status", params={"id": doc_id}
+    ).result_set
+    if rows and rows[0][0] == "done":
+        return  # a duplicate upload of a transcript that already has one
+    job_registry.update_job(job_id, progress="writing summary")
+    try:
+        summarize_document(graph, doc_id)
+    except Exception:  # noqa: BLE001 - recorded on the document by summarize_document
+        pass
+
+
+@router.get("/documents/{doc_id}/summary")
+async def get_summary_endpoint(doc_id: str, user: User = Depends(current_user)) -> dict:
+    rows = get_graph().query(
+        "MATCH (d:Document {id: $id}) RETURN d.doc_type, d.summary_status, d.summary, d.summary_error",
+        params={"id": doc_id},
+    ).result_set
+    if not rows or not _may_see(user, rows[0][0]):
+        raise HTTPException(status_code=404, detail="Document not found")
+    doc_type, status, summary, error = rows[0]
+    if doc_type != "patient_transcript":
+        raise HTTPException(status_code=400, detail="Only patient conversation transcripts have a summary.")
+    return {
+        "status": status or "none",
+        "summary": stored_summary({"summary": summary}),
+        "error": error or "",
+    }
+
+
+@router.post("/documents/{doc_id}/summary")
+async def regenerate_summary_endpoint(
+    doc_id: str, background_tasks: BackgroundTasks, _: User = Depends(ingest_user)
+) -> dict:
+    """Writes the transcript's summary again (for example after a failure,
+    or after switching OLLAMA_MODEL)."""
+    graph = get_graph()
+    rows = graph.query(
+        "MATCH (d:Document {id: $id}) RETURN d.doc_type, d.summary_status", params={"id": doc_id}
+    ).result_set
+    if not rows:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if rows[0][0] != "patient_transcript":
+        raise HTTPException(status_code=400, detail="Only patient conversation transcripts have a summary.")
+    if rows[0][1] == "running":
+        raise HTTPException(status_code=409, detail="A summary is already being written.")
+    graph.query("MATCH (d:Document {id: $id}) SET d.summary_status = 'running'", params={"id": doc_id})
+    background_tasks.add_task(_summarize_quietly, doc_id)
+    return {"status": "running"}
+
+
+def _summarize_quietly(doc_id: str) -> None:
+    try:
+        summarize_document(get_graph(), doc_id)
+    except Exception:  # noqa: BLE001 - recorded on the document
+        pass
+
+
 @router.get("/models")
 async def models_endpoint(_: User = Depends(current_user)) -> dict:
     """Which LLM ingestion uses for each document type, and which one chat
     uses, for the status bar on the ingest page."""
     settings = get_settings()
     return {
-        "ingest": {doc_type: describe_extraction_model(doc_type) for doc_type in ("textbook", "patient_record")},
+        "ingest": {doc_type: describe_extraction_model(doc_type) for doc_type in ("textbook", "patient_record", "patient_transcript")},
         "chat": {"provider": "ollama", "model": settings.ollama_model},
     }
 

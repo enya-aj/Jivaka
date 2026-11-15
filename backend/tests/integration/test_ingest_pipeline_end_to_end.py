@@ -541,3 +541,53 @@ def test_near_duplicate_waits_for_confirmation(graph, tmp_path):
     anyway = ingest_document(path=second, allow_near_duplicate=True, **kwargs)
     assert not anyway.duplicate
     assert graph.query("MATCH (d:Document) RETURN count(d)").result_set[0][0] == 3
+
+
+def test_transcript_is_deidentified_summarized_and_hidden_from_students(graph, tmp_path):
+    from jivaka.retrieval.graph_search import load_chunks, search
+    from jivaka.transcripts.summary import summarize_document
+
+    path = tmp_path / "visit.txt"
+    path.write_text(
+        "Doctor: Good morning, what brings you in?\n"
+        "Patient: I have had a fever for three days. Call me on 081-234-5678.\n"
+        "Doctor: Any pneumonia history? Let's start amoxicillin.\n"
+    )
+    result = ingest_document(
+        path=path,
+        doc_type="patient_transcript",
+        graph=graph,
+        extractor=FakeEntityExtractor(),
+        definition_source=StubDictionarySource(),
+        deidentifier=Deidentifier(),
+        uploaded_by=("doc@gmail.com", "Dr Doc"),
+    )
+    doc_id = result.document.id
+    chunks = graph.query(
+        "MATCH (:Document {id: $id})-[:HAS_CHUNK]->(c:Chunk) RETURN c.text, c.deidentified, c.source_type",
+        params={"id": doc_id},
+    ).result_set
+    assert chunks and all(row[1] is True and row[2] == "patient_transcript" for row in chunks)
+    assert "081-234-5678" not in " ".join(row[0] for row in chunks)
+    pseudonym = graph.query("MATCH (d:Document {id: $id}) RETURN d.pseudonym", params={"id": doc_id}).result_set[0][0]
+    assert pseudonym.startswith("P-")
+
+    doctor_hits = search(graph, ["fever"], top_k=5)
+    assert [c.source_label for c in doctor_hits] == [f"Patient {pseudonym} (conversation)"]
+    assert search(graph, ["fever"], top_k=5, include_patients=False) == []
+    chunk_id = doctor_hits[0].chunk_id
+    assert load_chunks(graph, [chunk_id], include_patients=False) == []
+
+    class FakeLLM:
+        model = "fake"
+
+        def generate_json(self, prompt):
+            assert "081-234-5678" not in prompt and "fever" in prompt
+            return {"language": "en", "subjective": "Fever 3 days", "objective": "Not discussed",
+                    "assessment": "Possible pneumonia", "plan": "Amoxicillin", "plain_summary": "Fever."}
+
+    summarize_document(graph, doc_id, FakeLLM())
+    row = graph.query(
+        "MATCH (d:Document {id: $id}) RETURN d.summary_status, d.summary", params={"id": doc_id}
+    ).result_set[0]
+    assert row[0] == "done" and "Amoxicillin" in row[1]

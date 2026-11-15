@@ -39,6 +39,7 @@ from jivaka.ingestion.models import (
     Entity,
     EntityRelation,
     IngestionResult,
+    is_patient_doc,
 )
 from jivaka.ingestion.ocr.detector import needs_ocr
 from jivaka.ingestion.ocr.easyocr_backend import ocr_image
@@ -318,7 +319,7 @@ def _ingest_loaded(
 
     # Patient records are de-identified before chunking, so the graph (chunk
     # text, extracted entities) never holds names, IDs or other identifiers.
-    is_patient_record = doc_type == "patient_record"
+    is_patient_record = is_patient_doc(doc_type)
     if is_patient_record:
         deidentifier = deidentifier or build_deidentifier(
             settings.deid_use_ner, settings.deid_extra_id_patterns
@@ -449,7 +450,7 @@ def extract_text(loaded: LoadedDocument, settings: Settings) -> tuple[str, int]:
 
 
 def _chunk_size(settings: Settings, doc_type: DocType) -> int:
-    if doc_type == "patient_record":
+    if is_patient_doc(doc_type):
         return settings.patient_record_chunk_max_chars
     return settings.textbook_chunk_max_chars
 
