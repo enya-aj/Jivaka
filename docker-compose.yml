@@ -63,7 +63,9 @@ services:
       # Desktop for Mac/Windows already).
       - "host.docker.internal:host-gateway"
     ports:
-      - "${BACKEND_PORT:-8000}:8000"
+      # Set BACKEND_BIND_ADDRESS=127.0.0.1 once Caddy serves HTTPS in front
+      # (the "https" profile), so the API is only reachable through it.
+      - "${BACKEND_BIND_ADDRESS:-0.0.0.0}:${BACKEND_PORT:-8000}:8000"
     environment:
       - FALKOR_HOST=falkordb
       - FALKOR_PORT=6379
@@ -86,12 +88,45 @@ services:
       - OPENROUTER_MAX_CONCURRENCY=${OPENROUTER_MAX_CONCURRENCY:-16}
       - OPENROUTER_DENY_DATA_COLLECTION=${OPENROUTER_DENY_DATA_COLLECTION:-true}
       - OPENROUTER_FOR_PATIENT_RECORDS=${OPENROUTER_FOR_PATIENT_RECORDS:-false}
+      - AUTH_ENABLED=${AUTH_ENABLED:-true}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-http://localhost:8000}
+      - ADMIN_EMAILS=${ADMIN_EMAILS:-}
+      - APP_DB_PATH=/app/data/app/jivaka.db
+      - SESSION_DAYS=${SESSION_DAYS:-14}
+      - COOKIE_SECURE=${COOKIE_SECURE:-true}
     volumes:
       - ./data/uploads:/app/data/uploads
+      # Users, sign-in sessions and chat history (SQLite).
+      - ./data/app:/app/data/app
       - ./data/reference:/app/data/reference
       - easyocr_models:/root/.EasyOCR
 
+  # HTTPS in front of the backend, with a certificate from Let's Encrypt.
+  # Needed for Google sign-in, which refuses plain-http addresses other than
+  # localhost. Start it with COMPOSE_PROFILES=...,https and SITE_ADDRESS set
+  # to the public host name (e.g. 187-127-210-88.sslip.io). Ports 80 and 443
+  # must be reachable from the internet for the certificate to be issued.
+  caddy:
+    image: caddy:2.8
+    profiles: ["https"]
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - SITE_ADDRESS=${SITE_ADDRESS:?set SITE_ADDRESS in .env for the https profile}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
 volumes:
+  caddy_data:
+  caddy_config:
   falkordb_data:
   ollama_models:
   easyocr_models:

@@ -26,6 +26,8 @@ id_rsa*
 # Data (uploaded documents and model caches should not be committed)
 data/uploads/*
 !data/uploads/.gitkeep
+data/app/*
+!data/app/.gitkeep
 
 # OS
 .DS_Store

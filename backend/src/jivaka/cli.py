@@ -22,12 +22,13 @@ class DocTypeArg(str, enum.Enum):
 
     patient_record = "patient_record"
     textbook = "textbook"
+    patient_transcript = "patient_transcript"
 
 
 @app.command()
 def ingest(
     path: Path = typer.Argument(..., exists=True, readable=True, help="Document to ingest"),
-    doc_type: DocTypeArg = typer.Option(..., "--doc-type", help="patient_record or textbook"),
+    doc_type: DocTypeArg = typer.Option(..., "--doc-type", help="patient_record, textbook or patient_transcript"),
     print_graph: bool = typer.Option(False, "--print-graph", help="Print the resulting graph"),
 ) -> None:
     """Ingest one document into the trinity graph."""
@@ -120,6 +121,50 @@ def deid_backfill() -> None:
     table.add_column("entities removed")
     for r in results:
         table.add_row(r.doc_id, r.pseudonym, str(r.chunks_updated), str(r.entities_removed))
+    console.print(table)
+
+
+@app.command()
+def summarize(doc_id: str = typer.Argument(..., help="Document id of a patient conversation transcript")) -> None:
+    """Write (or rewrite) a transcript's SOAP summary with the local Ollama model."""
+    from jivaka.transcripts.summary import summarize_document
+
+    summary = summarize_document(get_graph(), doc_id)
+    for field in ("subjective", "objective", "assessment", "plan", "plain_summary"):
+        console.print(f"[bold]{field}[/bold]: {summary.get(field, '')}")
+
+
+@app.command(name="fingerprint-backfill")
+def fingerprint_backfill() -> None:
+    """Fingerprint documents ingested before duplicate-content checks
+    existed, from their uploaded files, so new uploads are compared with
+    them too. Documents whose file is gone are listed and skipped."""
+    from jivaka.config import get_settings
+    from jivaka.db.schema import ensure_schema
+    from jivaka.ingestion.fingerprint import fingerprint
+    from jivaka.ingestion.graph_writer import GraphWriter
+    from jivaka.ingestion.intake import load_document
+    from jivaka.ingestion.pipeline import extract_text
+
+    settings = get_settings()
+    graph = get_graph()
+    ensure_schema(graph)
+    writer = GraphWriter(graph)
+    rows = graph.query(
+        "MATCH (d:Document) WHERE d.content_signature IS NULL RETURN d.id, d.filename"
+    ).result_set
+    table = Table(title="Fingerprints")
+    table.add_column("document")
+    table.add_column("result")
+    for doc_id, filename in rows:
+        path = Path(settings.upload_dir) / Path(filename or "").name
+        if not filename or not path.exists():
+            table.add_row(filename or doc_id, "[yellow]skipped: uploaded file not found[/yellow]")
+            continue
+        text, _ = extract_text(load_document(path), settings)
+        fp = fingerprint(text)
+        writer.set_fingerprint(doc_id, fp.content_hash, fp.signature)
+        table.add_row(filename, "done")
     console.print(table)
 
 

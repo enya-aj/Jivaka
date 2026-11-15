@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Jivaka — Users</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #6b7280; --border: #d8dde3;
+    --accent: #2563eb; --danger: #dc2626; --success: #16a34a; --panel: #f7f8fa;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171c; --fg: #e6e8eb; --muted: #9aa3af; --border: #2c3138;
+      --accent: #60a5fa; --danger: #f87171; --success: #4ade80; --panel: #1b1f26;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, "Noto Sans Thai", "Sarabun", sans-serif;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
+  header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.5rem; }
+  header h1 { margin: 0; font-size: 1.25rem; }
+  header nav { display: flex; gap: 1rem; font-size: 0.9rem; }
+  header .spacer { flex: 1; }
+  a { color: var(--accent); }
+  h2 { font-size: 1rem; margin: 2rem 0 0.75rem; }
+  .muted { color: var(--muted); font-size: 0.9rem; }
+  form.invite { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
+  input, select, button { font: inherit; padding: 0.4rem 0.6rem; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--fg); }
+  input[type=email] { flex: 1; min-width: 220px; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.danger { color: var(--danger); }
+  .table-scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  th { color: var(--muted); font-weight: 600; }
+  tr.off td { opacity: 0.55; }
+  .msg { margin: 0.75rem 0 0; font-size: 0.9rem; }
+  .msg.error { color: var(--danger); }
+  .msg.ok { color: var(--success); }
+  dl.roles { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem; font-size: 0.9rem; margin: 0; }
+  dl.roles dt { font-weight: 600; }
+  dl.roles dd { margin: 0; color: var(--muted); }
+</style>
+<script src="/auth.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Jivaka</h1>
+    <nav><a href="/">Ingest documents</a><a href="/chat">Chat</a><span>Users</span></nav>
+    <span class="spacer"></span>
+    <div id="userbar"></div>
+  </header>
+
+  <h2>Invite someone</h2>
+  <p class="muted">Only people on this list can sign in, with the Google account for the address you enter here.</p>
+  <form class="invite" id="invite">
+    <input type="email" id="email" placeholder="name@gmail.com" required />
+    <select id="role">
+      <option value="student">Student</option>
+      <option value="doctor">Doctor</option>
+      <option value="admin">Admin</option>
+    </select>
+    <button class="primary" type="submit">Add</button>
+  </form>
+  <p class="msg" id="msg" hidden></p>
+
+  <h2>People</h2>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Email</th><th>Name</th><th>Role</th><th>Last sign-in</th><th></th></tr></thead>
+      <tbody id="users"><tr><td colspan="5" class="muted">Loading…</td></tr></tbody>
+    </table>
+  </div>
+
+  <h2>What each role can do</h2>
+  <dl class="roles">
+    <dt>Admin</dt><dd>Everything a doctor can do, plus managing this list and reading everyone's chat history.</dd>
+    <dt>Doctor</dt><dd>Uploads documents and removes their own, and chats with answers from textbooks, de-identified patient records and conversation transcripts.</dd>
+    <dt>Student</dt><dd>Chats with answers from textbooks only. Can't upload, or see patient records or transcripts.</dd>
+  </dl>
+</div>
+<script>
+  let me = null;
+  const msg = document.getElementById("msg");
+
+  function show(text, ok) {
+    msg.textContent = text;
+    msg.className = "msg " + (ok ? "ok" : "error");
+    msg.hidden = false;
+  }
+
+  async function errorText(res) {
+    try {
+      const body = await res.json();
+      if (typeof body.detail === "string") return body.detail;
+      if (Array.isArray(body.detail)) return body.detail.map((d) => d.msg).join("; ");
+    } catch (_) {}
+    return `Request failed (${res.status}).`;
+  }
+
+  function when(ts) {
+    return ts ? new Date(ts * 1000).toLocaleString() : "never";
+  }
+
+  async function change(email, body) {
+    const res = await fetch(`/admin/users/${encodeURIComponent(email)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) show(await errorText(res), false);
+    await load();
+  }
+
+  async function remove(email) {
+    if (!confirm(`Remove ${email}? They won't be able to sign in any more.`)) return;
+    const res = await fetch(`/admin/users/${encodeURIComponent(email)}`, { method: "DELETE" });
+    if (!res.ok) show(await errorText(res), false);
+    else show(`Removed ${email}.`, true);
+    await load();
+  }
+
+  function row(user) {
+    const tr = document.createElement("tr");
+    if (!user.active) tr.className = "off";
+    const self = me && user.email === me.email;
+
+    const email = document.createElement("td");
+    email.textContent = user.email + (self ? " (you)" : "");
+    const name = document.createElement("td");
+    name.textContent = user.name || "—";
+
+    const roleCell = document.createElement("td");
+    const select = document.createElement("select");
+    for (const [value, label] of [["student", "Student"], ["doctor", "Doctor"], ["admin", "Admin"]]) {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = label;
+      opt.selected = user.role === value;
+      select.appendChild(opt);
+    }
+    select.disabled = self;
+    select.addEventListener("change", () => change(user.email, { role: select.value }));
+    roleCell.appendChild(select);
+
+    const last = document.createElement("td");
+    last.textContent = when(user.last_login_at);
+
+    const actions = document.createElement("td");
+    if (!self) {
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.textContent = user.active ? "Switch off" : "Switch on";
+      toggle.addEventListener("click", () => change(user.email, { active: !user.active }));
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "danger";
+      del.textContent = "Remove";
+      del.addEventListener("click", () => remove(user.email));
+      actions.append(toggle, " ", del);
+    }
+    tr.append(email, name, roleCell, last, actions);
+    return tr;
+  }
+
+  async function load() {
+    const res = await fetch("/admin/users");
+    const tbody = document.getElementById("users");
+    if (!res.ok) {
+      tbody.innerHTML = "";
+      show(await errorText(res), false);
+      return;
+    }
+    const users = await res.json();
+    tbody.textContent = "";
+    for (const user of users) tbody.appendChild(row(user));
+  }
+
+  document.getElementById("invite").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const email = document.getElementById("email").value.trim();
+    const role = document.getElementById("role").value;
+    const res = await fetch("/admin/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, role }),
+    });
+    if (!res.ok) {
+      show(await errorText(res), false);
+      return;
+    }
+    show(`Added ${email}. They can sign in now.`, true);
+    document.getElementById("email").value = "";
+    await load();
+  });
+
+  window.jivakaUser.then((user) => {
+    me = user;
+    load();
+  });
+</script>
+</body>
+</html>

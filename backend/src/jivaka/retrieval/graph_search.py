@@ -10,7 +10,14 @@ from falkordb import Graph
 RELATED_WEIGHT = 0.5
 
 # Patient chunks are only ever read once de-identified (see jivaka.deid).
-_READABLE = "(c.source_type <> 'patient_record' OR c.deidentified = true)"
+_PATIENT_TYPES = "['patient_record', 'patient_transcript']"
+_READABLE = f"(NOT c.source_type IN {_PATIENT_TYPES} OR c.deidentified = true)"
+# For people who may not see patient records at all (students).
+_READABLE_NO_PATIENTS = f"(NOT c.source_type IN {_PATIENT_TYPES})"
+
+
+def _readable(include_patients: bool) -> str:
+    return _READABLE if include_patients else _READABLE_NO_PATIENTS
 
 # Uploads are saved as "<uuid hex>_<original name>" (see api/routes.py).
 _UPLOAD_PREFIX_RE = re.compile(r"^[0-9a-f]{32}_")
@@ -51,13 +58,19 @@ class RetrievedChunk:
 
 
 def search(
-    graph: Graph, terms: Sequence[str], pseudonyms: Sequence[str] = (), top_k: int = 6
+    graph: Graph,
+    terms: Sequence[str],
+    pseudonyms: Sequence[str] = (),
+    top_k: int = 6,
+    include_patients: bool = True,
 ) -> list[RetrievedChunk]:
     """Ranks chunks across the whole graph by how many of the question's
     entities they mention (directly, via a shared Definition, or one
     RELATED_TO hop away). A patient pseudonym in the question narrows the
     search to that patient's records."""
     doc_ids: Optional[list[str]] = None
+    if pseudonyms and not include_patients:
+        pseudonyms = ()
     if pseudonyms:
         rows = graph.query(
             "MATCH (d:Document) WHERE d.pseudonym IN $pseudonyms RETURN d.id", params={"pseudonyms": list(pseudonyms)}
@@ -86,11 +99,11 @@ def search(
         for names, weight in ((direct, 1.0), (related, RELATED_WEIGHT)):
             if not names:
                 continue
-            for chunk_id, hits in _mention_counts(graph, names, doc_ids):
+            for chunk_id, hits in _mention_counts(graph, names, doc_ids, include_patients):
                 scores[chunk_id] += hits * weight
     elif doc_ids:
         rows = graph.query(
-            f"MATCH (c:Chunk) WHERE c.doc_id IN $doc_ids AND {_READABLE} "
+            f"MATCH (c:Chunk) WHERE c.doc_id IN $doc_ids AND {_readable(include_patients)} "
             "RETURN c.id ORDER BY c.order LIMIT $limit",
             params={"doc_ids": doc_ids, "limit": top_k},
         ).result_set
@@ -98,28 +111,31 @@ def search(
 
     if not scores:
         return []
-    chunks = {c.chunk_id: c for c in load_chunks(graph, list(scores))}
+    chunks = {c.chunk_id: c for c in load_chunks(graph, list(scores), include_patients)}
     ranked = sorted(chunks.values(), key=lambda c: (-scores[c.chunk_id], c.doc_id, c.order))[:top_k]
     for chunk in ranked:
         chunk.score = scores[chunk.chunk_id]
     return ranked
 
 
-def _mention_counts(graph: Graph, names: set[str], doc_ids: Optional[list[str]]) -> list[tuple[str, int]]:
+def _mention_counts(
+    graph: Graph, names: set[str], doc_ids: Optional[list[str]], include_patients: bool = True
+) -> list[tuple[str, int]]:
     doc_filter = "AND c.doc_id IN $doc_ids " if doc_ids is not None else ""
     rows = graph.query(
-        f"MATCH (c:Chunk)-[:MENTIONS]->(e:Entity) WHERE e.normalized_name IN $names AND {_READABLE} "
+        f"MATCH (c:Chunk)-[:MENTIONS]->(e:Entity) WHERE e.normalized_name IN $names AND {_readable(include_patients)} "
         f"{doc_filter}RETURN c.id, count(DISTINCT e.normalized_name)",
         params={"names": sorted(names), "doc_ids": doc_ids or []},
     ).result_set
     return [(row[0], row[1]) for row in rows]
 
 
-def load_chunks(graph: Graph, chunk_ids: Sequence[str]) -> list[RetrievedChunk]:
+def load_chunks(graph: Graph, chunk_ids: Sequence[str], include_patients: bool = True) -> list[RetrievedChunk]:
     """Chunks with their document label, entities and definitions. Patient
-    chunks that haven't been de-identified are never returned."""
+    chunks that haven't been de-identified are never returned, and none at
+    all when include_patients is false."""
     rows = graph.query(
-        f"MATCH (d:Document)-[:HAS_CHUNK]->(c:Chunk) WHERE c.id IN $ids AND {_READABLE} "
+        f"MATCH (d:Document)-[:HAS_CHUNK]->(c:Chunk) WHERE c.id IN $ids AND {_readable(include_patients)} "
         "RETURN c, d.doc_type, d.filename, d.pseudonym",
         params={"ids": list(chunk_ids)},
     ).result_set
@@ -129,6 +145,8 @@ def load_chunks(graph: Graph, chunk_ids: Sequence[str]) -> list[RetrievedChunk]:
         if doc_type == "patient_record":
             # Never the filename: it often carries the patient's name.
             label = f"Patient {pseudonym}" if pseudonym else "Patient record"
+        elif doc_type == "patient_transcript":
+            label = f"Patient {pseudonym} (conversation)" if pseudonym else "Patient conversation"
         else:
             label = _UPLOAD_PREFIX_RE.sub("", filename or "") or "Unknown document"
         chunks[props["id"]] = RetrievedChunk(

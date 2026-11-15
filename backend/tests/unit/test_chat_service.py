@@ -29,7 +29,7 @@ def chunk(chunk_id="c1"):
 def fake_search(results_by_call):
     calls = []
 
-    def search(graph, terms, pseudonyms, top_k):
+    def search(graph, terms, pseudonyms, top_k, include_patients=True):
         calls.append((list(terms), list(pseudonyms)))
         return results_by_call[min(len(calls), len(results_by_call)) - 1]
 

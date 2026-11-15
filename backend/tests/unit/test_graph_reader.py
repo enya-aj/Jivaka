@@ -32,7 +32,8 @@ def test_list_documents_returns_node_properties_in_order():
 
     result = list_documents(graph, limit=10)
 
-    assert result == docs
+    # Documents from before sign-in are shown as uploaded by the admin.
+    assert result == [{**d, "ingested_by": "admin", "ingested_by_name": "Admin"} for d in docs]
     cypher, params = graph.calls[0]
     assert "ORDER BY d.ingested_at DESC" in cypher
     assert params == {"limit": 10}

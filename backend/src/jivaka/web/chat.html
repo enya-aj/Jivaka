@@ -4,6 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Jivaka — Chat</title>
+<script src="/auth.js"></script>
 <style>
   :root {
     color-scheme: light dark;
@@ -159,7 +160,36 @@
   .entity { font-size: 0.85rem; padding: 0.3rem 0; border-bottom: 1px solid var(--border); }
   .entity .type { color: var(--accent); font-size: 0.72rem; text-transform: uppercase; margin-right: 0.35rem; }
   .entity .def { color: var(--muted); display: block; margin-top: 0.15rem; }
+  .history {
+    width: 260px;
+    flex-shrink: 0;
+    border-right: 1px solid var(--border);
+    background: var(--panel);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .history-head { padding: 1rem 0.9rem 0.5rem; display: flex; flex-direction: column; gap: 0.5rem; }
+  .history-head .new { width: 100%; }
+  .history-head label { font-size: 0.8rem; color: var(--muted); display: flex; gap: 0.4rem; align-items: center; }
+  .history-list { list-style: none; margin: 0; padding: 0 0.5rem 1rem; overflow-y: auto; flex: 1; }
+  .history-list li { display: flex; align-items: center; border-radius: 6px; }
+  .history-list li.active, .history-list li:hover { background: var(--bg); }
+  .history-list .open-conv {
+    flex: 1; min-width: 0; text-align: left; background: none; border: none; color: var(--fg);
+    padding: 0.45rem 0.5rem; cursor: pointer; font: inherit; font-size: 0.85rem;
+  }
+  .history-list .open-conv .t { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .history-list .open-conv .who { display: block; color: var(--muted); font-size: 0.72rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .history-list .conv-action { background: none; border: none; color: var(--muted); cursor: pointer; padding: 0.3rem; font-size: 0.8rem; visibility: hidden; }
+  .history-list li:hover .conv-action, .history-list li.active .conv-action { visibility: visible; }
+  .history-empty { color: var(--muted); font-size: 0.82rem; padding: 0.5rem 0.9rem; }
+  .readonly-note { max-width: 820px; margin: 0 auto 0.5rem; color: var(--muted); font-size: 0.8rem; }
+  #history-toggle { display: none; }
   @media (max-width: 820px) {
+    .history { position: fixed; inset: 0 auto 0 0; z-index: 5; box-shadow: 4px 0 16px rgba(0,0,0,0.15); display: none; }
+    .history.open { display: flex; }
+    #history-toggle { display: inline; }
     aside { position: fixed; inset: auto 0 0 0; width: auto; max-height: 70vh; border-left: none; border-top: 1px solid var(--border); box-shadow: 0 -4px 16px rgba(0,0,0,0.15); }
     header, #conversation, .composer { padding-left: 1rem; padding-right: 1rem; }
   }
@@ -167,12 +197,20 @@
 </head>
 <body>
 <div class="layout">
+  <nav class="history" id="history" aria-label="Chat history">
+    <div class="history-head">
+      <button class="primary new" id="new-chat" type="button">New chat</button>
+      <label id="everyone-label" hidden><input type="checkbox" id="everyone" /> Everyone's chats (admin)</label>
+    </div>
+    <ul class="history-list" id="history-list"></ul>
+  </nav>
   <div class="main">
     <header>
       <h1>Jivaka</h1>
-      <nav><a href="/">Ingest documents</a><span>Chat</span></nav>
+      <nav><a href="/" data-needs-ingest>Ingest documents</a><span>Chat</span></nav>
       <span class="spacer"></span>
-      <button class="link" id="new-chat" type="button">New chat</button>
+      <button class="link" id="history-toggle" type="button">History</button>
+      <div id="userbar"></div>
       <p class="notice">Answers come only from ingested textbooks and anonymized patient records, and are not clinical advice. Patients are named by pseudonym, e.g. P-0001.</p>
     </header>
 
@@ -194,7 +232,7 @@
         <textarea id="question" rows="1" placeholder="Ask a question…" required></textarea>
         <button class="primary" type="submit" id="send-btn">Send</button>
       </form>
-      <p class="hint">Enter to send, Shift+Enter for a new line. The conversation is kept only in this tab.</p>
+      <p class="hint">Enter to send, Shift+Enter for a new line. Chats are saved to your history; admins can read them for audits.</p>
     </div>
   </div>
 
@@ -208,9 +246,12 @@ const STATUS_TEXT = {
   writing: "Writing answer… (this waits if the model is busy with an ingestion job)",
 };
 
-// The conversation so far, sent with every question: the server keeps no history.
-let history = [];
+// The saved conversation being shown, or null for a new one. The server
+// keeps the history; each question only sends this id.
+let conversationId = null;
+let readOnly = false;
 let busy = false;
+let me = null;
 
 function el(tag, attrs = {}, children = []) {
   const node = document.createElement(tag);
@@ -274,7 +315,8 @@ async function openSource(source, button) {
   });
   panel.appendChild(close);
   panel.appendChild(el("h2", { text: `[${source.number}] ${source.source_label}` }));
-  const meta = [source.doc_type === "patient_record" ? "Patient record (anonymized)" : "Textbook", sourceMeta(source)]
+  const kind = { patient_record: "Patient record (anonymized)", patient_transcript: "Patient conversation (anonymized)" };
+  const meta = [kind[source.doc_type] || "Textbook", sourceMeta(source)]
     .filter(Boolean)
     .join(" · ");
   panel.appendChild(el("div", { class: "meta", text: meta }));
@@ -347,8 +389,8 @@ async function ask(question) {
   const scroller = document.getElementById("conversation");
   scroller.scrollTop = scroller.scrollHeight;
 
-  const messages = [...history, { role: "user", content: question }];
   let text = "";
+  const startedNew = conversationId === null;
   let sourcesByNumber = new Map();
   let failed = false;
   setStatus(statusNode, `<span class="spinner"></span><span>${STATUS_TEXT.searching}</span>`);
@@ -357,14 +399,16 @@ async function ask(question) {
     const res = await fetch(`${API}/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages }),
+      body: JSON.stringify({ question, conversation_id: conversationId }),
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       throw new Error(typeof body.detail === "string" ? body.detail : `Request failed (${res.status})`);
     }
     for await (const event of readEvents(res)) {
-      if (event.type === "status") {
+      if (event.type === "conversation") {
+        conversationId = event.data.id;
+      } else if (event.type === "status") {
         setStatus(statusNode, `<span class="spinner"></span><span>${STATUS_TEXT[event.data] || ""}</span>`);
       } else if (event.type === "sources") {
         sourcesByNumber = new Map(event.data.map((s) => [s.number, s]));
@@ -385,11 +429,13 @@ async function ask(question) {
     statusNode.appendChild(el("span", { class: "error", text: `Error: ${e.message}` }));
   }
 
-  if (!failed && text) {
-    history = [...messages, { role: "assistant", content: text }];
+  if (failed && startedNew) {
+    // The server drops a new conversation whose first answer failed.
+    conversationId = null;
   }
   busy = false;
-  document.getElementById("send-btn").disabled = false;
+  document.getElementById("send-btn").disabled = readOnly;
+  loadHistory();
   document.getElementById("question").focus();
 }
 
@@ -417,10 +463,146 @@ input.addEventListener("input", () => {
   input.style.height = `${input.scrollHeight}px`;
 });
 
-document.getElementById("new-chat").addEventListener("click", () => {
+// History sidebar
+
+const thread = document.getElementById("thread");
+const emptyStateTemplate = document.getElementById("empty-state").cloneNode(true);
+const history_ = document.getElementById("history");
+
+function setReadOnly(owner) {
+  readOnly = Boolean(owner);
+  input.disabled = readOnly;
+  document.getElementById("send-btn").disabled = readOnly || busy;
+  const old = document.getElementById("readonly-note");
+  if (old) old.remove();
+  if (readOnly) {
+    const note = el("p", { class: "readonly-note", id: "readonly-note", text: `Reading ${owner}'s chat. Only they can continue it.` });
+    document.querySelector(".composer").prepend(note);
+  }
+}
+
+function newChat() {
   if (busy) return;
-  history = [];
-  window.location.reload();
+  conversationId = null;
+  thread.textContent = "";
+  thread.appendChild(emptyStateTemplate.cloneNode(true));
+  document.getElementById("source-panel").className = "";
+  setReadOnly(null);
+  markActive();
+  history_.classList.remove("open");
+  input.focus();
+}
+
+function renderStoredAnswer(message) {
+  const sources = message.sources || [];
+  const sourcesByNumber = new Map(sources.map((s) => [s.number, s]));
+  const answerNode = el("div", { class: "answer" });
+  renderAnswer(answerNode, message.content, sourcesByNumber);
+  const sourcesNode = el("div", { class: "sources" });
+  renderSources(sourcesNode, sources);
+  thread.appendChild(el("div", { class: "msg assistant" }, [answerNode, sourcesNode]));
+}
+
+async function openConversation(id) {
+  if (busy) return;
+  const res = await fetch(`${API}/conversations/${encodeURIComponent(id)}`);
+  if (!res.ok) {
+    loadHistory();
+    return;
+  }
+  const conversation = await res.json();
+  conversationId = conversation.id;
+  thread.textContent = "";
+  document.getElementById("source-panel").className = "";
+  for (const message of conversation.messages) {
+    if (message.role === "user") {
+      thread.appendChild(el("div", { class: "msg user" }, [el("div", { class: "bubble", text: message.content })]));
+    } else {
+      renderStoredAnswer(message);
+    }
+  }
+  setReadOnly(conversation.read_only ? conversation.user_email : null);
+  markActive();
+  history_.classList.remove("open");
+  const scroller = document.getElementById("conversation");
+  scroller.scrollTop = scroller.scrollHeight;
+}
+
+function markActive() {
+  document.querySelectorAll("#history-list li").forEach((li) => {
+    li.classList.toggle("active", li.dataset.id === conversationId);
+  });
+}
+
+async function renameConversation(conv) {
+  const title = prompt("Rename this chat", conv.title);
+  if (!title || !title.trim()) return;
+  await fetch(`${API}/conversations/${encodeURIComponent(conv.id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title: title.trim() }),
+  });
+  loadHistory();
+}
+
+async function deleteConversation(conv) {
+  if (!confirm(`Delete "${conv.title}"? This can't be undone.`)) return;
+  await fetch(`${API}/conversations/${encodeURIComponent(conv.id)}`, { method: "DELETE" });
+  if (conv.id === conversationId) newChat();
+  loadHistory();
+}
+
+async function loadHistory() {
+  const everyone = document.getElementById("everyone").checked;
+  const res = await fetch(`${API}/conversations${everyone ? "?everyone=true" : ""}`);
+  const list = document.getElementById("history-list");
+  if (!res.ok) return;
+  const conversations = await res.json();
+  list.textContent = "";
+  if (!conversations.length) {
+    list.appendChild(el("li", { class: "history-empty", text: everyone ? "Nobody has chatted yet." : "Your chats will appear here." }));
+    return;
+  }
+  for (const conv of conversations) {
+    const mine = me && conv.user_email === me.email;
+    const open = el("button", { class: "open-conv", type: "button", title: conv.title }, [
+      el("span", { class: "t", text: conv.title }),
+      el("span", { class: "who", text: (mine ? "" : conv.user_email + " · ") + new Date(conv.updated_at * 1000).toLocaleString() }),
+    ]);
+    open.addEventListener("click", () => openConversation(conv.id));
+    const li = el("li", {}, [open]);
+    li.dataset.id = conv.id;
+    if (mine) {
+      const rename = el("button", { class: "conv-action", type: "button", title: "Rename", text: "✎" });
+      rename.addEventListener("click", () => renameConversation(conv));
+      li.appendChild(rename);
+    }
+    if (mine || (me && me.role === "admin")) {
+      const del = el("button", { class: "conv-action", type: "button", title: "Delete", text: "✕" });
+      del.addEventListener("click", () => deleteConversation(conv));
+      li.appendChild(del);
+    }
+    list.appendChild(li);
+  }
+  markActive();
+}
+
+document.getElementById("new-chat").addEventListener("click", newChat);
+document.getElementById("history-toggle").addEventListener("click", () => history_.classList.toggle("open"));
+document.getElementById("everyone").addEventListener("change", loadHistory);
+
+window.jivakaUser.then((user) => {
+  me = user;
+  if (user && user.role === "admin") document.getElementById("everyone-label").hidden = false;
+  if (user && !user.can_see_patient_records) {
+    // Students get textbook answers only, so drop the patient wording.
+    const notice = document.querySelector(".notice");
+    if (notice) notice.textContent = "Answers come only from ingested textbooks and are not clinical advice.";
+    for (const root of [document, emptyStateTemplate]) {
+      root.querySelectorAll(".empty-state li, li").forEach((li) => { if (li.textContent.includes("P-0001")) li.remove(); });
+    }
+  }
+  loadHistory();
 });
 </script>
 </body>

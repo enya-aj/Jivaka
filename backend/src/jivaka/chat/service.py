@@ -30,10 +30,18 @@ class ChatEvent:
 
 
 class ChatService:
-    def __init__(self, graph: Graph, llm: Optional[OllamaClient] = None, top_k: int = 6):
+    def __init__(
+        self,
+        graph: Graph,
+        llm: Optional[OllamaClient] = None,
+        top_k: int = 6,
+        include_patients: bool = True,
+    ):
         self.graph = graph
         self.llm = llm or OllamaClient()
         self.top_k = top_k
+        # False for students: answers come from textbooks only.
+        self.include_patients = include_patients
 
     def answer(self, messages: Sequence[dict]) -> Iterator[ChatEvent]:
         question = messages[-1]["content"]
@@ -65,16 +73,18 @@ class ChatService:
                 if pseudonyms:
                     break
 
-        results = search(self.graph, terms, pseudonyms, self.top_k)
+        results = search(self.graph, terms, pseudonyms, self.top_k, self.include_patients)
         if not results and earlier:
             follow_up_terms = list(terms)
             for text in earlier:
                 follow_up_terms += self._terms(text)
-            results = search(self.graph, list(dict.fromkeys(follow_up_terms)), pseudonyms, self.top_k)
-        if not results and pseudonyms:
+            results = search(
+                self.graph, list(dict.fromkeys(follow_up_terms)), pseudonyms, self.top_k, self.include_patients
+            )
+        if not results and pseudonyms and self.include_patients:
             # "Summarise P-0042" names no entity: give that patient's
             # records in order instead.
-            results = search(self.graph, [], pseudonyms, self.top_k)
+            results = search(self.graph, [], pseudonyms, self.top_k, self.include_patients)
         return results
 
     def _terms(self, text: str) -> list[str]:

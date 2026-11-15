@@ -3,11 +3,13 @@ from typing import Optional
 from jivaka.ingestion.chunking.base import Chunker
 from jivaka.ingestion.chunking.patient_record_chunker import PatientRecordChunker
 from jivaka.ingestion.chunking.textbook_chunker import TextbookChunker
+from jivaka.ingestion.chunking.transcript_chunker import TranscriptChunker
 from jivaka.ingestion.models import DocType
 
 _CHUNKERS: dict[DocType, type[Chunker]] = {
     "patient_record": PatientRecordChunker,
     "textbook": TextbookChunker,
+    "patient_transcript": TranscriptChunker,
 }
 
 

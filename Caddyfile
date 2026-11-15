@@ -1,0 +1,14 @@
+# HTTPS front for the Jivaka backend (compose profile "https").
+# Caddy gets and renews the certificate for SITE_ADDRESS by itself.
+{$SITE_ADDRESS} {
+	encode gzip
+	# Chat answers stream as Server-Sent Events; don't buffer them.
+	reverse_proxy backend:8000 {
+		flush_interval -1
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy same-origin
+	}
+}
