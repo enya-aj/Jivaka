@@ -2,7 +2,7 @@ import shutil
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Query, UploadFile
 
 from jivaka.api import jobs as job_registry
 from jivaka.config import get_settings
@@ -166,10 +166,16 @@ async def delete_document_endpoint(doc_id: str) -> dict:
     return {"deleted": doc_id}
 
 
+# The page draws at most this many chunks of a document. Reading a whole
+# large document (e.g. a 67k-chunk thesaurus) times out in FalkorDB, and the
+# browser's force layout couldn't draw it anyway.
+GRAPH_VIEW_MAX_CHUNKS = 100
+
+
 @router.get("/documents/{doc_id}/graph")
-async def get_graph_endpoint(doc_id: str) -> dict:
+async def get_graph_endpoint(doc_id: str, max_chunks: int = Query(GRAPH_VIEW_MAX_CHUNKS, ge=1, le=1000)) -> dict:
     graph = get_graph()
-    dump = get_document_graph(graph, doc_id)
+    dump = get_document_graph(graph, doc_id, max_chunks=max_chunks)
     if dump is None:
         raise HTTPException(status_code=404, detail="Document not found")
     return dump

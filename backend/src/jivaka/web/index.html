@@ -193,6 +193,7 @@
       </div>
     </div>
     <table id="summary-table"></table>
+    <p class="model-note" id="truncated-note" style="display:none;"></p>
     <div id="graph-tree" class="tree"></div>
     <div id="graph-diagram" style="display:none;"></div>
   </div>
@@ -855,14 +856,30 @@ document.getElementById("view-tree-btn").addEventListener("click", () => setResu
 document.getElementById("view-graph-btn").addEventListener("click", () => setResultView("graph"));
 
 async function showGraph(docId, resultForSummary) {
-  const res = await fetch(`${API}/documents/${docId}/graph`);
-  if (!res.ok) return;
+  let res;
+  try {
+    res = await fetch(`${API}/documents/${docId}/graph`);
+  } catch (e) {
+    setStatusText("error", "Couldn't load this document's graph: the server didn't answer.");
+    return;
+  }
+  if (!res.ok) {
+    setStatusText("error", `Couldn't load this document's graph (server error ${res.status}).`);
+    return;
+  }
   const dump = await res.json();
   currentDump = dump;
   graphDiagramBuilt = false;
   document.getElementById("result-panel").style.display = "block";
   if (resultForSummary) renderSummary(resultForSummary);
   else document.getElementById("summary-table").innerHTML = "";
+  const note = document.getElementById("truncated-note");
+  if (dump.truncated) {
+    note.textContent = `This document is large, so only its first ${dump.chunks.length} of ${dump.total_chunks} chunks are shown.`;
+    note.style.display = "block";
+  } else {
+    note.style.display = "none";
+  }
   renderTree(dump);
   setResultView(resultView);
 }
